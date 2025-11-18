@@ -26,10 +26,17 @@ jobs:
         working-directory: ./frontend
         run: npm ci
       
+      - name: Set API base URL
+        id: set-api-url
+        run: |
+          if [ -n "${{ secrets.REMOVE_BG_HOST }}" ]; then
+            echo "VITE_API_BASE_URL=${{ secrets.REMOVE_BG_HOST }}" >> $GITHUB_ENV
+          else
+            echo "VITE_API_BASE_URL=http://localhost:8000" >> $GITHUB_ENV
+          fi
+      
       - name: Build frontend
         working-directory: ./frontend
-        env:
-          VITE_API_BASE_URL: ${{ secrets.API_BASE_URL || 'http://localhost:8000' }}
         run: npm run build
       
       - name: Setup Python
@@ -45,26 +52,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
+      - name: Set deployment path
+        id: set-deploy-path
+        run: |
+          if [ -n "${{ secrets.DEPLOY_PATH }}" ]; then
+            echo "DEPLOY_PATH=${{ secrets.DEPLOY_PATH }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_PATH=/var/www/removebg" >> $GITHUB_ENV
+          fi
+      
+      - name: Set SSH port
+        id: set-ssh-port
+        run: |
+          if [ -n "${{ secrets.SSH_BACKEND_PORT }}" ]; then
+            echo "SSH_PORT=${{ secrets.SSH_BACKEND_PORT }}" >> $GITHUB_ENV
+          else
+            echo "SSH_PORT=22" >> $GITHUB_ENV
+          fi
+      
       - name: Deploy to IONOS via SSH
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.IONOS_HOST }}
-          username: ${{ secrets.IONOS_USERNAME }}
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.IONOS_SSH_KEY }}
-          port: ${{ secrets.IONOS_SSH_PORT || 22 }}
+          port: ${{ env.SSH_PORT }}
           source: "frontend/dist,backend"
-          target: "/var/www/removebg"
+          target: ${{ env.DEPLOY_PATH }}
           strip_components: 0
+          debug: true
       
       - name: Execute deployment script on server
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.IONOS_HOST }}
-          username: ${{ secrets.IONOS_USERNAME }}
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.IONOS_SSH_KEY }}
-          port: ${{ secrets.IONOS_SSH_PORT || 22 }}
+          port: ${{ env.SSH_PORT }}
+          debug: true
           script: |
-            cd /var/www/removebg
+            cd ${{ env.DEPLOY_PATH }}
             chmod +x deploy.sh
             ./deploy.sh
 

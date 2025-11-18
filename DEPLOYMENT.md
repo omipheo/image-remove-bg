@@ -43,13 +43,18 @@ sudo chown -R $USER:$USER /var/www/removebg
 
 ### 2. GitHub Secrets Configuration
 
-Go to your GitHub repository → Settings → Secrets and variables → Actions, and add the following secrets:
+Go to your GitHub repository → Settings → Secrets and variables → Actions, and ensure you have the following secrets:
 
-- `IONOS_HOST`: Your IONOS server IP address or domain
-- `IONOS_USERNAME`: SSH username (usually `root` or your user)
-- `IONOS_SSH_KEY`: Your private SSH key (content of `~/.ssh/id_rsa`)
-- `IONOS_SSH_PORT`: SSH port (default: 22)
-- `API_BASE_URL`: Your production API URL (e.g., `https://yourdomain.com` or `http://your-ip:8000`)
+**Required Secrets:**
+- `SERVER_HOST`: Your IONOS server IP address or domain
+- `SERVER_USER`: SSH username (usually `root` or your user)
+- `IONOS_SSH_KEY`: Your private SSH key (content of `~/.ssh/id_rsa`) - **MUST BE ADDED**
+- `REMOVE_BG_HOST`: Your production API URL (e.g., `https://yourdomain.com` or `http://your-ip:8000`)
+
+**Optional Secrets:**
+- `DEPLOY_PATH`: Deployment directory path (default: `/var/www/removebg`)
+- `SSH_BACKEND_PORT`: SSH port for backend deployment (default: 22)
+- `SSH_FRONTEND_PORT`: SSH port for frontend deployment (default: 22)
 
 #### Generate SSH Key (if needed)
 
