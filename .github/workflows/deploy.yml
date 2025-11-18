@@ -65,6 +65,23 @@ jobs:
             echo "SSH_PORT=${SSH_PORT_VAL}" >> $GITHUB_ENV
           fi
       
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "Error: SERVER_HOST secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "Error: SERVER_USER secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.IONOS_SSH_KEY }}" ]; then
+            echo "Error: IONOS_SSH_KEY secret is not set or is empty"
+            echo "Please ensure the SSH private key is correctly set in GitHub Secrets"
+            exit 1
+          fi
+          echo "All required secrets are set"
+      
       - name: Deploy to IONOS via SSH
         uses: appleboy/scp-action@v0.1.7
         with:
