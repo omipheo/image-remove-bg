@@ -26,18 +26,10 @@ jobs:
         working-directory: ./frontend
         run: npm ci
       
-      - name: Set API base URL
-        id: set-api-url
-        run: |
-          API_URL="${{ secrets.REMOVE_BG_HOST }}"
-          if [ -z "$API_URL" ] || [ "$API_URL" = "" ]; then
-            echo "VITE_API_BASE_URL=http://localhost:8000" >> $GITHUB_ENV
-          else
-            echo "VITE_API_BASE_URL=${API_URL}" >> $GITHUB_ENV
-          fi
-      
       - name: Build frontend
         working-directory: ./frontend
+        env:
+          VITE_API_BASE_URL: ${{ secrets.REMOVE_BG_HOST }}
         run: npm run build
       
       - name: Setup Python
