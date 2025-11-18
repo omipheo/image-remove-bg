@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
       
@@ -29,10 +29,11 @@ jobs:
       - name: Set API base URL
         id: set-api-url
         run: |
-          if [ -n "${{ secrets.REMOVE_BG_HOST }}" ]; then
-            echo "VITE_API_BASE_URL=${{ secrets.REMOVE_BG_HOST }}" >> $GITHUB_ENV
-          else
+          API_URL="${{ secrets.REMOVE_BG_HOST }}"
+          if [ -z "$API_URL" ] || [ "$API_URL" = "" ]; then
             echo "VITE_API_BASE_URL=http://localhost:8000" >> $GITHUB_ENV
+          else
+            echo "VITE_API_BASE_URL=${API_URL}" >> $GITHUB_ENV
           fi
       
       - name: Build frontend
@@ -55,19 +56,21 @@ jobs:
       - name: Set deployment path
         id: set-deploy-path
         run: |
-          if [ -n "${{ secrets.DEPLOY_PATH }}" ]; then
-            echo "DEPLOY_PATH=${{ secrets.DEPLOY_PATH }}" >> $GITHUB_ENV
-          else
+          DEPLOY_PATH_VAL="${{ secrets.DEPLOY_PATH }}"
+          if [ -z "$DEPLOY_PATH_VAL" ] || [ "$DEPLOY_PATH_VAL" = "" ]; then
             echo "DEPLOY_PATH=/var/www/removebg" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_PATH=${DEPLOY_PATH_VAL}" >> $GITHUB_ENV
           fi
       
       - name: Set SSH port
         id: set-ssh-port
         run: |
-          if [ -n "${{ secrets.SSH_BACKEND_PORT }}" ]; then
-            echo "SSH_PORT=${{ secrets.SSH_BACKEND_PORT }}" >> $GITHUB_ENV
-          else
+          SSH_PORT_VAL="${{ secrets.SSH_BACKEND_PORT }}"
+          if [ -z "$SSH_PORT_VAL" ] || [ "$SSH_PORT_VAL" = "" ]; then
             echo "SSH_PORT=22" >> $GITHUB_ENV
+          else
+            echo "SSH_PORT=${SSH_PORT_VAL}" >> $GITHUB_ENV
           fi
       
       - name: Deploy to IONOS via SSH
