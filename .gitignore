@@ -35,3 +35,14 @@ backend/venv/
 backend/ENV/
 backend/.venv
 backend/*.egg-info/
+backend/.env
+
+# frontend
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# Deployment
+*.pem
+*.key
+deploy.sh.local
