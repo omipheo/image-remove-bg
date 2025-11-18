@@ -82,21 +82,7 @@ jobs:
           fi
           echo "All required secrets are set"
       
-      - name: Deploy to IONOS via SSH
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.IONOS_SSH_KEY }}
-          port: ${{ env.SSH_PORT }}
-          source: "frontend/dist,backend"
-          target: ${{ env.DEPLOY_PATH }}
-          strip_components: 0
-          debug: true
-          timeout: 60s
-          command_timeout: 60s
-      
-      - name: Execute deployment script on server
+      - name: Deploy to IONOS via Git
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -108,6 +94,29 @@ jobs:
           command_timeout: 300s
           script: |
             cd ${{ env.DEPLOY_PATH }}
+            
+            # Clone or pull the repository
+            if [ -d ".git" ]; then
+              echo "Repository exists, pulling latest changes..."
+              git pull origin main || git pull origin master
+            else
+              echo "Cloning repository..."
+              REPO_URL="${{ secrets.GITHUB_REPO_URL }}"
+              if [ -z "$REPO_URL" ]; then
+                # Try to construct from GITHUB_REPOSITORY
+                REPO_URL="https://github.com/${{ github.repository }}.git"
+              fi
+              git clone $REPO_URL .
+            fi
+            
+            # Build frontend
+            echo "Building frontend..."
+            cd frontend
+            npm ci
+            VITE_API_BASE_URL="${{ secrets.REMOVE_BG_HOST }}" npm run build
+            cd ..
+            
+            # Run deployment script
             chmod +x deploy.sh
             ./deploy.sh
 

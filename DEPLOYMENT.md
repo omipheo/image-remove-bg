@@ -54,7 +54,7 @@ Go to your GitHub repository → Settings → Secrets and variables → Actions,
 **Optional Secrets:**
 - `DEPLOY_PATH`: Deployment directory path (default: `/var/www/removebg`)
 - `SSH_BACKEND_PORT`: SSH port for backend deployment (default: 22)
-- `SSH_FRONTEND_PORT`: SSH port for frontend deployment (default: 22)
+- `GITHUB_REPO_URL`: Full GitHub repository URL (default: auto-detected from workflow)
 
 #### Generate SSH Key (if needed)
 
@@ -105,8 +105,16 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) will automatically:
 
 1. Build the frontend React app
 2. Install backend Python dependencies
-3. Deploy files to the server via SCP
-4. Execute the deployment script on the server
+3. SSH into the server and:
+   - Clone or pull the latest code from GitHub
+   - Build the frontend on the server
+   - Execute the deployment script
+
+**Note:** The server needs Node.js installed for building the frontend. If not already installed:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+```
 
 ### 6. Manual Deployment (Alternative)
 

@@ -5,8 +5,9 @@ set -e
 
 echo "Starting deployment..."
 
-# Navigate to deployment directory
-cd /var/www/removebg || exit
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR" || exit
 
 # Backend setup
 echo "Setting up backend..."
