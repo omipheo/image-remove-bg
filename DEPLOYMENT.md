@@ -188,6 +188,64 @@ sudo systemctl restart nginx
 
 ## Troubleshooting
 
+### SSH Connection Timeout (GitHub Actions can't connect)
+
+If you see `dial tcp ***:***: i/o timeout` error, check the following on your server:
+
+1. **Check SSH service status:**
+   ```bash
+   sudo systemctl status ssh
+   # or
+   sudo systemctl status sshd
+   ```
+
+2. **Check what port SSH is listening on:**
+   ```bash
+   sudo ss -tlnp | grep ssh
+   # or
+   sudo netstat -tlnp | grep ssh
+   ```
+   Make sure the port matches your `SSH_BACKEND_PORT` secret (default is 22).
+
+3. **Check firewall (UFW) status:**
+   ```bash
+   sudo ufw status
+   # If SSH port is blocked, allow it:
+   sudo ufw allow 22/tcp
+   # or if using custom port:
+   sudo ufw allow YOUR_SSH_PORT/tcp
+   sudo ufw reload
+   ```
+
+4. **Check IONOS Firewall/Security Groups:**
+   - Log into IONOS control panel
+   - Go to your server's firewall/security settings
+   - Ensure SSH port (usually 22) is open for incoming connections
+   - Allow connections from `0.0.0.0/0` or GitHub Actions IP ranges
+
+5. **Verify SSH is accessible from outside:**
+   ```bash
+   # On your local machine, test connection:
+   ssh -v -p YOUR_PORT username@YOUR_SERVER_IP
+   ```
+
+6. **Check SSH configuration:**
+   ```bash
+   sudo nano /etc/ssh/sshd_config
+   # Ensure these are set:
+   # Port 22 (or your custom port)
+   # PermitRootLogin yes (if using root)
+   # PasswordAuthentication no (if using keys only)
+   # Then restart SSH:
+   sudo systemctl restart ssh
+   ```
+
+7. **Verify public key is in authorized_keys:**
+   ```bash
+   cat ~/.ssh/authorized_keys
+   # Make sure the public key corresponding to your GitHub secret is there
+   ```
+
 ### Backend not starting
 
 1. Check logs: `sudo journalctl -u removebg-backend -n 50`

@@ -93,6 +93,8 @@ jobs:
           target: ${{ env.DEPLOY_PATH }}
           strip_components: 0
           debug: true
+          timeout: 60s
+          command_timeout: 60s
       
       - name: Execute deployment script on server
         uses: appleboy/ssh-action@v1.0.3
@@ -102,6 +104,8 @@ jobs:
           key: ${{ secrets.IONOS_SSH_KEY }}
           port: ${{ env.SSH_PORT }}
           debug: true
+          timeout: 60s
+          command_timeout: 300s
           script: |
             cd ${{ env.DEPLOY_PATH }}
             chmod +x deploy.sh
