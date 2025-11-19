@@ -13,9 +13,21 @@ cd "$SCRIPT_DIR" || exit
 echo "Setting up backend..."
 cd backend || exit
 
+# Check Python version and use python3.12 if available, otherwise python3
+PYTHON_CMD="python3"
+if command -v python3.12 &> /dev/null; then
+    PYTHON_CMD="python3.12"
+    echo "Using Python 3.12"
+elif command -v python3.11 &> /dev/null; then
+    PYTHON_CMD="python3.11"
+    echo "Using Python 3.11"
+else
+    echo "Using default Python 3 (may need Python 3.11+ for scipy 1.16.3)"
+fi
+
 # Create virtual environment if it doesn't exist
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
+    $PYTHON_CMD -m venv venv
 fi
 
 # Activate virtual environment

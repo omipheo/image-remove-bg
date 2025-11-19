@@ -20,8 +20,16 @@ This guide explains how to deploy the Background Removal Tool to an IONOS server
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install Python and pip
-sudo apt install python3 python3-pip python3-venv -y
+# Install Python 3.12 and pip
+sudo apt update
+sudo apt install software-properties-common -y
+sudo add-apt-repository ppa:deadsnakes/ppa -y
+sudo apt update
+sudo apt install python3.12 python3.12-venv python3.12-dev -y
+sudo apt install python3-pip -y
+
+# Create symlink for python3.12 (optional, for convenience)
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install Node.js (if not already installed)
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
