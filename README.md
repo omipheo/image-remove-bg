@@ -53,31 +53,13 @@ Backend will run on `http://localhost:8000`
 
 ## Deployment
 
-### Deployment Options
-
-1. **IONOS Only (CPU Processing)**: See [DEPLOYMENT.md](./DEPLOYMENT.md)
-   - Traditional deployment with CPU-based processing
-   - Lower cost, slower processing
-
-2. **IONOS + RunPod (GPU Processing)**: See [HYBRID_DEPLOYMENT.md](./HYBRID_DEPLOYMENT.md) ⚡
-   - Hybrid architecture with GPU acceleration
-   - IONOS: Frontend + API Gateway
-   - RunPod RTX A4000: GPU processing
-   - **Cost**: ~$11-140/month depending on traffic
-   - **Performance**: 10-50x faster than CPU
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment instructions to IONOS server using CI/CD pipeline.
 
 ### Quick Deploy Steps
 
-**IONOS Only:**
 1. Set up GitHub Secrets (see DEPLOYMENT.md)
 2. Push to `main` branch
 3. GitHub Actions will automatically deploy to IONOS server
-
-**IONOS + RunPod (Recommended for Production):**
-1. Deploy GPU service on RunPod (see HYBRID_DEPLOYMENT.md)
-2. Configure IONOS server to use remote GPU
-3. Set environment variables (see CONFIGURATION.md)
-4. Deploy frontend and API gateway to IONOS
 
 ## Project Structure
 
@@ -91,21 +73,13 @@ Backend will run on `http://localhost:8000`
 │   │       └── api.js # API configuration
 │   └── package.json
 ├── backend/           # FastAPI backend
-│   ├── main.py       # API gateway (IONOS server)
-│   ├── gpu_processor.py # GPU processing service (RunPod)
+│   ├── main.py       # API server
 │   └── requirements.txt
-├── runpod/            # RunPod deployment files
-│   ├── Dockerfile     # Docker image for RunPod
-│   ├── start.sh       # Startup script
-│   └── README.md      # RunPod setup guide
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml # CI/CD pipeline
-├── deploy.sh         # Deployment script (IONOS)
-├── nginx.conf.example # Nginx configuration
-├── DEPLOYMENT.md      # IONOS-only deployment guide
-├── HYBRID_DEPLOYMENT.md # IONOS + RunPod deployment guide
-└── CONFIGURATION.md   # Configuration reference
+├── deploy.sh         # Deployment script
+└── nginx.conf.example # Nginx configuration
 ```
 
 ## API Endpoints
