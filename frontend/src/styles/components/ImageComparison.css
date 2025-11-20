@@ -1,0 +1,152 @@
+.image-section {
+  margin: 40px 0;
+  animation: fadeIn 0.5s ease;
+  width: 100%;
+}
+
+.images-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+  width: 100%;
+  margin-bottom: 30px;
+}
+
+.image-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.image-label {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #333;
+  margin: 0;
+  text-align: center;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.image-container {
+  border-radius: 15px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  background: #f5f5f5;
+  padding: 20px;
+  min-height: 400px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.image-container img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 10px;
+  max-height: 70vh;
+  min-height: 300px;
+  object-fit: contain;
+  margin: 0 auto;
+  width: auto;
+}
+
+.image-info {
+  margin-top: 20px;
+  padding: 15px;
+  background: #f8f9fa;
+  border-radius: 10px;
+  text-align: left;
+  display: inline-block;
+  min-width: 300px;
+}
+
+.image-info-item {
+  margin: 8px 0;
+  color: #555;
+  font-size: 0.95rem;
+}
+
+.image-info-label {
+  font-weight: 600;
+  color: #333;
+  margin-right: 8px;
+}
+
+.download-section {
+  margin-top: 30px;
+  animation: fadeIn 0.5s ease;
+}
+
+.download-btn {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(17, 153, 142, 0.4);
+}
+
+.download-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(17, 153, 142, 0.6);
+}
+
+.download-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.download-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-icon {
+  font-size: 1.3rem;
+}
+
+@media (max-width: 600px) {
+  .image-container {
+    padding: 15px;
+    min-height: 300px;
+  }
+
+  .image-container img {
+    max-height: 50vh;
+    min-height: 200px;
+  }
+
+  .image-info {
+    min-width: 100%;
+    margin-top: 15px;
+  }
+
+  .images-comparison {
+        grid-template-columns: 1fr;
+        gap: 20px;
+    }
+
+  .image-label {
+    font-size: 1rem;
+  }
+}
+

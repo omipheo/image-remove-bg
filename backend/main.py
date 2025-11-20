@@ -8,6 +8,10 @@ import io
 from transparent_background import Remover
 import uvicorn
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI(title="Image Background Removal API")
 
@@ -36,7 +40,15 @@ def get_remover():
     """Lazy load the remover to avoid loading model on startup"""
     global _remover
     if _remover is None:
-        _remover = Remover()
+        try:
+            print("Initializing transparent_background Remover...")
+            _remover = Remover()
+            print("Remover initialized successfully")
+        except Exception as e:
+            print(f"Error initializing Remover: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
     return _remover
 
 
@@ -74,12 +86,12 @@ async def upload_image(request: Request):
                 raise HTTPException(status_code=400, detail="Invalid file type")
         
         # Get optional parameters with defaults
-        backgroundColor = form_data.get("backgroundColor", "transparent")
-        fileType = form_data.get("fileType", "PNG")
+        backgroundColor = form_data.get("backgroundColor", "white")
+        fileType = form_data.get("fileType", "JPEG")
         
         # Normalize and validate parameters
-        bg_color = backgroundColor.lower() if backgroundColor else "transparent"
-        output_format = fileType.upper() if fileType else "PNG"
+        bg_color = backgroundColor.lower() if backgroundColor else "white"
+        output_format = fileType.upper() if fileType else "JPEG"
         
         # Validate file type
         if not hasattr(file, 'content_type') or not file.content_type or not file.content_type.startswith("image/"):
@@ -99,9 +111,19 @@ async def upload_image(request: Request):
         input_image = Image.open(io.BytesIO(image_data))
         
         # Remove background using transparent-background (InSPyReNet)
-        remover = get_remover()
-        # transparent-background expects PIL Image and returns PIL Image with RGBA
-        processed_image = remover.process(input_image, type='rgba')
+        print(f"Processing image: {file.filename}, size: {len(image_data)} bytes")
+        try:
+            remover = get_remover()
+            # transparent-background expects PIL Image and returns PIL Image with RGBA
+            print("Calling remover.process()...")
+            processed_image = remover.process(input_image, type='rgba')
+            print("Background removal completed successfully")
+        except Exception as e:
+            import traceback
+            error_msg = f"Error during background removal: {str(e)}"
+            print(error_msg)
+            print(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Ensure the result is in RGBA mode
         if processed_image.mode != 'RGBA':
@@ -153,11 +175,15 @@ async def upload_image(request: Request):
         processed_image.save(img_byte_arr, format=output_format, quality=95)
         img_byte_arr.seek(0)
         processed_image_bytes = img_byte_arr.read()
+        print(f"Processed image size: {len(processed_image_bytes)} bytes")
         
         # Convert to base64 for frontend
         import base64
+        print("Encoding to base64...")
         image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
+        print(f"Base64 encoded size: {len(image_base64)} characters")
         image_url = f"data:{mime_type};base64,{image_base64}"
+        print("Image processing completed, returning response")
         
         # Store the processed image (in production, use proper storage)
         image_id = f"img_{len(processed_images)}"
@@ -285,7 +311,17 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
+    # Use 127.0.0.1 for development (better Windows compatibility)
+    # Use 0.0.0.0 for production (allows external connections)
+    host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host=host, port=port)
+    print(f"Starting server on http://{host}:{port}")
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port,
+        timeout_keep_alive=300,  # Increase timeout for long-running requests
+        limit_concurrency=10,     # Limit concurrent requests
+        limit_max_requests=100    # Limit total requests
+    )
 

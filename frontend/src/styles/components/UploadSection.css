@@ -1,0 +1,238 @@
+.upload-section {
+  margin-bottom: 30px;
+}
+
+.drop-zone {
+  border: 3px dashed #e0e0e0;
+  border-radius: 15px;
+  padding: 40px;
+  background: #fafafa;
+  transition: all 0.3s ease;
+  cursor: pointer;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drop-zone:hover {
+  border-color: #667eea;
+  background: #f5f5ff;
+}
+
+.drop-zone.dragging {
+  border-color: #667eea;
+  background: #f0f0ff;
+  transform: scale(1.02);
+  box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+}
+
+.drop-zone-content {
+  text-align: center;
+  width: 100%;
+}
+
+.drop-zone-icon {
+  font-size: 4rem;
+  display: block;
+  margin-bottom: 15px;
+  animation: bounce 2s infinite;
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.drop-zone-text {
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: #333;
+  margin: 10px 0;
+}
+
+.drop-zone-subtext {
+  font-size: 1rem;
+  color: #666;
+  margin: 15px 0 10px 0;
+}
+
+.drop-zone-hint {
+  font-size: 0.9rem;
+  color: #999;
+  margin-top: 15px;
+  font-style: italic;
+}
+
+.button-group {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.upload-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.download-all-btn {
+  background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(72, 187, 120, 0.4);
+}
+
+.download-zip-btn {
+  background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(66, 153, 225, 0.4);
+}
+
+.stop-btn {
+  background: linear-gradient(135deg, #f56565 0%, #e53e3e 100%);
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(245, 101, 101, 0.4);
+  animation: pulse 2s infinite;
+}
+
+.upload-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+}
+
+.upload-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.upload-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.download-all-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(72, 187, 120, 0.6);
+}
+
+.download-all-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.download-all-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.download-zip-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(66, 153, 225, 0.6);
+}
+
+.download-zip-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.download-zip-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.stop-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(245, 101, 101, 0.6);
+}
+
+.stop-btn:active {
+  transform: translateY(0);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    box-shadow: 0 4px 15px rgba(245, 101, 101, 0.4);
+  }
+  50% {
+    box-shadow: 0 4px 20px rgba(245, 101, 101, 0.7);
+  }
+}
+
+.btn-icon {
+  font-size: 1.3rem;
+}
+
+@media (max-width: 600px) {
+  .drop-zone {
+    padding: 30px 20px;
+    min-height: 150px;
+  }
+
+  .drop-zone-icon {
+    font-size: 3rem;
+  }
+
+  .drop-zone-text {
+    font-size: 1.1rem;
+  }
+
+  .button-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .upload-btn,
+  .download-all-btn,
+  .download-zip-btn,
+  .stop-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
