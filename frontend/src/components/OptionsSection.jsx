@@ -1,6 +1,6 @@
 import '../styles/components/OptionsSection.css'
 
-const OptionsSection = ({ fileType, backgroundColor, downloadMethod, onFileTypeChange, onBackgroundColorChange, onDownloadMethodChange, isLoading }) => {
+const OptionsSection = ({ fileType, backgroundColor, downloadMethod, watermark, downloadMode, onFileTypeChange, onBackgroundColorChange, onDownloadMethodChange, onWatermarkChange, onDownloadModeChange, isLoading }) => {
   return (
     <div className="options-section">
       <div className="option-group">
@@ -31,12 +31,38 @@ const OptionsSection = ({ fileType, backgroundColor, downloadMethod, onFileTypeC
       </div>
 
       <div className="option-group">
+        <label className="option-label">Watermark:</label>
+        <select
+          className="option-select"
+          value={watermark}
+          onChange={(e) => onWatermarkChange(e.target.value)}
+          disabled={isLoading}
+        >
+          <option value="none">None</option>
+          <option value="blog">Blog</option>
+        </select>
+      </div>
+
+      <div className="option-group">
+        <label className="option-label">Download Mode:</label>
+        <select
+          className="option-select"
+          value={downloadMode}
+          onChange={(e) => onDownloadModeChange(e.target.value)}
+          disabled={isLoading}
+        >
+          <option value="manual">Manual</option>
+          <option value="automatic">Automatic</option>
+        </select>
+      </div>
+
+      <div className="option-group">
         <label className="option-label">Download Method:</label>
         <select
           className="option-select"
           value={downloadMethod}
           onChange={(e) => onDownloadMethodChange(e.target.value)}
-          disabled={isLoading}
+          disabled={isLoading || downloadMode === 'automatic'}
         >
           <option value="individual">Individual Files</option>
           <option value="zip">ZIP File</option>

@@ -12,6 +12,16 @@ const HomePage = () => {
   const [fileType, setFileType] = useState('JPEG')
   const [backgroundColor, setBackgroundColor] = useState('white')
   const [downloadMethod, setDownloadMethod] = useState('zip')
+  const [watermark, setWatermark] = useState('blog')
+  const [downloadMode, setDownloadMode] = useState('manual')
+  
+  const handleDownloadModeChange = (mode) => {
+    setDownloadMode(mode)
+    // Automatically set Download Method to ZIP when Automatic mode is selected
+    if (mode === 'automatic') {
+      setDownloadMethod('zip')
+    }
+  }
   
   const {
     imageUrl,
@@ -38,9 +48,9 @@ const HomePage = () => {
     }
 
     if (imageFiles.length === 1) {
-      processImage(imageFiles[0], backgroundColor, fileType)
+      processImage(imageFiles[0], backgroundColor, fileType, watermark, downloadMode)
     } else {
-      processMultipleImages(imageFiles, backgroundColor, fileType)
+      processMultipleImages(imageFiles, backgroundColor, fileType, watermark, downloadMode)
     }
   }
 
@@ -54,15 +64,20 @@ const HomePage = () => {
         onDownloadAll={() => downloadAllProcessedImages(fileType, downloadMethod === 'zip')}
         hasProcessedImages={!!(imageUrl || (processedImages && processedImages.length > 0))}
         onStop={stopProcessing}
+        showDownload={downloadMode === 'manual'}
       />
 
       <OptionsSection
         fileType={fileType}
         backgroundColor={backgroundColor}
         downloadMethod={downloadMethod}
+        watermark={watermark}
+        downloadMode={downloadMode}
         onFileTypeChange={setFileType}
         onBackgroundColorChange={setBackgroundColor}
         onDownloadMethodChange={setDownloadMethod}
+        onWatermarkChange={setWatermark}
+        onDownloadModeChange={handleDownloadModeChange}
         isLoading={isLoading}
       />
 
@@ -77,6 +92,7 @@ const HomePage = () => {
         currentFile={currentFile}
         onDownload={() => downloadImage(fileType)}
         isLoading={isLoading}
+        showDownload={downloadMode === 'manual'}
       />
 
       <MultipleImagesGrid
@@ -84,6 +100,7 @@ const HomePage = () => {
         onDownload={downloadProcessedImage}
         fileType={fileType}
         isLoading={isLoading}
+        showDownload={downloadMode === 'manual'}
       />
     </div>
   )

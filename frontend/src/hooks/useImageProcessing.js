@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import JSZip from 'jszip'
 import { uploadImageToBackend, downloadImageFromBackend } from '../services/api'
-import { readImageAsDataURL, downloadFile, generateDownloadFilename, dataURLToBlob } from '../utils/fileUtils'
+import { readImageAsDataURL, downloadFile, generateDownloadFilename, dataURLToBlob, addWatermark } from '../utils/fileUtils'
 import { API_CONFIG } from '../config/api'
 
 export const useImageProcessing = () => {
@@ -15,7 +15,7 @@ export const useImageProcessing = () => {
   const abortControllerRef = useRef(null)
   const isCancelledRef = useRef(false)
 
-  const processImage = async (file, backgroundColor, fileType) => {
+  const processImage = async (file, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual') => {
     if (!file) return
 
     // Reset cancellation flag
@@ -49,9 +49,35 @@ export const useImageProcessing = () => {
           return
         }
         
-        setImageUrl(result.imageUrl)
+        // Apply watermark if needed
+        let finalImageUrl = result.imageUrl
+        if (watermark === 'blog') {
+          finalImageUrl = await addWatermark(result.imageUrl, backgroundColor)
+        }
+        
+        setImageUrl(finalImageUrl)
         setImageId(result.imageId)
         setIsLoading(false)
+        
+        // Auto-download if enabled
+        if (downloadMode === 'automatic') {
+          // Small delay to ensure UI updates and state is set
+          setTimeout(async () => {
+            try {
+              // Use the finalImageUrl directly instead of relying on state
+              const blob = dataURLToBlob(finalImageUrl)
+              const filename = generateDownloadFilename(file.name || 'image.png', fileType)
+              downloadFile(blob, filename)
+              console.log('Auto-download triggered:', filename)
+            } catch (err) {
+              console.error('Auto-download failed:', err)
+              // Fallback: try again after a bit more delay to ensure state is ready
+              setTimeout(() => {
+                downloadImage(fileType)
+              }, 500)
+            }
+          }, 800) // Increased delay to ensure state is updated
+        }
       } else {
         // Local mode
         if (isCancelledRef.current) {
@@ -71,7 +97,7 @@ export const useImageProcessing = () => {
     }
   }
 
-  const processMultipleImages = async (files, backgroundColor, fileType) => {
+  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual') => {
     const imageFiles = files.filter(file => file.type.startsWith('image/'))
     if (imageFiles.length === 0) {
       setError('Please select at least one image file')
@@ -87,7 +113,8 @@ export const useImageProcessing = () => {
 
     // Process first image immediately for single image view
     if (imageFiles.length > 0) {
-      await processImage(imageFiles[0], backgroundColor, fileType)
+      // For single image, don't auto-download here (it will be handled in processImage)
+      await processImage(imageFiles[0], backgroundColor, fileType, watermark, imageFiles.length === 1 ? downloadMode : 'manual')
       
       if (isCancelledRef.current) {
         return
@@ -99,6 +126,9 @@ export const useImageProcessing = () => {
       setIsLoading(true)
       // Clear previous processed images
       setProcessedImages([])
+      
+      // Collect all processed images for auto-download
+      const allProcessedImagesForDownload = []
 
       for (let i = 1; i < imageFiles.length; i++) {
         if (isCancelledRef.current) {
@@ -120,13 +150,22 @@ export const useImageProcessing = () => {
               break
             }
             
+            // Apply watermark if needed
+            let processedUrl = result.imageUrl
+            if (watermark === 'blog') {
+              processedUrl = await addWatermark(result.imageUrl, backgroundColor)
+            }
+            
             // Add image to state immediately as it's processed
             const newImage = {
               file,
               originalUrl,
-              processedUrl: result.imageUrl,
+              processedUrl: processedUrl,
               imageId: result.imageId
             }
+            
+            // Store for auto-download
+            allProcessedImagesForDownload.push(newImage)
             
             // Use functional update to add to existing array
             setProcessedImages(prev => [...prev, newImage])
@@ -137,6 +176,9 @@ export const useImageProcessing = () => {
               originalUrl,
               processedUrl: originalUrl
             }
+            
+            // Store for auto-download
+            allProcessedImagesForDownload.push(newImage)
             
             // Use functional update to add to existing array
             setProcessedImages(prev => [...prev, newImage])
@@ -150,6 +192,65 @@ export const useImageProcessing = () => {
       }
 
       setIsLoading(false)
+      
+      // Auto-download if enabled (for multiple images, download all as ZIP)
+      if (downloadMode === 'automatic' && !isCancelledRef.current) {
+        // Small delay to ensure UI updates
+        setTimeout(async () => {
+          try {
+            // Create ZIP with all images
+            const zip = new JSZip()
+            const imagesToZip = []
+            
+            // Add first image (from imageUrl state)
+            if (imageUrl && currentFile) {
+              imagesToZip.push({
+                url: imageUrl,
+                file: currentFile
+              })
+            }
+            
+            // Add all remaining processed images
+            allProcessedImagesForDownload.forEach(item => {
+              imagesToZip.push({
+                url: item.processedUrl,
+                file: item.file
+              })
+            })
+            
+            if (imagesToZip.length === 0) {
+              console.warn('No processed images found for auto-download')
+              return
+            }
+            
+            // Create ZIP
+            for (let i = 0; i < imagesToZip.length; i++) {
+              const item = imagesToZip[i]
+              try {
+                const blob = dataURLToBlob(item.url)
+                const filename = generateDownloadFilename(item.file.name, fileType)
+                zip.file(filename, blob)
+              } catch (err) {
+                console.error(`Error adding ${item.file.name} to ZIP:`, err)
+              }
+            }
+            
+            // Generate and download ZIP
+            if (Object.keys(zip.files).length > 0) {
+              const zipBlob = await zip.generateAsync({ 
+                type: 'blob',
+                compression: 'DEFLATE',
+                compressionOptions: { level: 6 }
+              })
+              const zipFilename = `processed-images-${new Date().toISOString().slice(0, 10)}.zip`
+              downloadFile(zipBlob, zipFilename)
+              console.log('Auto-download ZIP triggered:', zipFilename, `(${Object.keys(zip.files).length} images)`)
+            }
+          } catch (err) {
+            console.error('Auto-download failed:', err)
+          }
+        }, 1000) // Delay to ensure state is updated
+      }
     }
   }
 
@@ -162,21 +263,14 @@ export const useImageProcessing = () => {
     setError('Processing stopped by user')
   }
 
-  const downloadImage = async (fileType) => {
+  const downloadImage = async (fileType, watermark = 'none') => {
     if (!imageUrl) return
 
     try {
-      if (API_CONFIG.USE_BACKEND) {
-        if (!imageId) {
-          throw new Error('No image ID available')
-        }
-        const blob = await downloadImageFromBackend(imageId, fileType)
-        const filename = generateDownloadFilename(currentFile?.name || 'image.png', fileType)
-        downloadFile(blob, filename)
-      } else {
-        const filename = currentFile?.name || 'downloaded-image.png'
-        downloadFile(imageUrl, filename)
-      }
+      // Use the displayed image URL which already has watermark applied
+      const blob = dataURLToBlob(imageUrl)
+      const filename = generateDownloadFilename(currentFile?.name || 'image.png', fileType)
+      downloadFile(blob, filename)
     } catch (err) {
       setError(err.message)
     }
@@ -184,13 +278,10 @@ export const useImageProcessing = () => {
 
   const downloadProcessedImage = async (item, fileType) => {
     try {
-      if (API_CONFIG.USE_BACKEND && item.imageId) {
-        const blob = await downloadImageFromBackend(item.imageId, fileType)
-        const filename = generateDownloadFilename(item.file.name, fileType)
-        downloadFile(blob, filename)
-      } else {
-        downloadFile(item.processedUrl, item.file.name)
-      }
+      // Use the displayed processed URL which already has watermark applied
+      const blob = dataURLToBlob(item.processedUrl)
+      const filename = generateDownloadFilename(item.file.name, fileType)
+      downloadFile(blob, filename)
     } catch (err) {
       setError(`Failed to download ${item.file.name}: ${err.message}`)
     }
@@ -235,22 +326,17 @@ export const useImageProcessing = () => {
           let blob
           
           try {
-            if (API_CONFIG.USE_BACKEND && item.imageId) {
-              console.log(`Downloading image ${i + 1}/${imagesToDownload.length} from backend:`, item.imageId)
-              blob = await downloadImageFromBackend(item.imageId, fileType)
+            // Use the watermarked URL from state (already has watermark applied)
+            if (item.url && item.url.startsWith('data:')) {
+              console.log(`Converting data URL to blob for image ${i + 1}/${imagesToDownload.length}`)
+              blob = dataURLToBlob(item.url)
+            } else if (item.url) {
+              // If it's already a URL, fetch it
+              console.log(`Fetching image ${i + 1}/${imagesToDownload.length} from URL`)
+              const response = await fetch(item.url)
+              blob = await response.blob()
             } else {
-              // Convert data URL to blob
-              if (item.url && item.url.startsWith('data:')) {
-                console.log(`Converting data URL to blob for image ${i + 1}/${imagesToDownload.length}`)
-                blob = dataURLToBlob(item.url)
-              } else if (item.url) {
-                // If it's already a URL, fetch it
-                console.log(`Fetching image ${i + 1}/${imagesToDownload.length} from URL`)
-                const response = await fetch(item.url)
-                blob = await response.blob()
-              } else {
-                throw new Error(`No valid URL or imageId for image ${i + 1}`)
-              }
+              throw new Error(`No valid URL for image ${i + 1}`)
             }
             
             if (!blob || blob.size === 0) {
@@ -289,14 +375,10 @@ export const useImageProcessing = () => {
         for (let i = 0; i < imagesToDownload.length; i++) {
           const item = imagesToDownload[i]
           
-          if (API_CONFIG.USE_BACKEND && item.imageId) {
-            const blob = await downloadImageFromBackend(item.imageId, fileType)
-            const filename = generateDownloadFilename(item.file.name, fileType)
-            downloadFile(blob, filename)
-          } else {
-            const filename = generateDownloadFilename(item.file.name, fileType)
-            downloadFile(item.url, filename)
-          }
+          // Use the watermarked URL from state (already has watermark applied)
+          const blob = dataURLToBlob(item.url)
+          const filename = generateDownloadFilename(item.file.name, fileType)
+          downloadFile(blob, filename)
           
           // Small delay between downloads to prevent browser from blocking multiple downloads
           if (i < imagesToDownload.length - 1) {

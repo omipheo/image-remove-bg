@@ -1,6 +1,6 @@
 import '../styles/components/MultipleImagesGrid.css'
 
-const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading }) => {
+const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, showDownload = true }) => {
   if (!processedImages || processedImages.length === 0) return null
 
   return (
@@ -30,14 +30,16 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading }
                 </div>
               </div>
             </div>
-            <button
-              className="image-card-download"
-              onClick={() => onDownload(item, fileType)}
-              disabled={isLoading}
-            >
-              <span className="btn-icon">📥</span>
-              Download
-            </button>
+            {showDownload && (
+              <button
+                className="image-card-download"
+                onClick={() => onDownload(item, fileType)}
+                disabled={isLoading}
+              >
+                <span className="btn-icon">📥</span>
+                Download
+              </button>
+            )}
           </div>
         ))}
       </div>

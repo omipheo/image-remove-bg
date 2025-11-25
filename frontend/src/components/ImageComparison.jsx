@@ -1,6 +1,6 @@
 import '../styles/components/ImageComparison.css'
 
-const ImageComparison = ({ originalImageUrl, processedImageUrl, currentFile, onDownload, isLoading }) => {
+const ImageComparison = ({ originalImageUrl, processedImageUrl, currentFile, onDownload, isLoading, showDownload = true }) => {
   if (!originalImageUrl && !processedImageUrl) return null
 
   return (
@@ -44,7 +44,7 @@ const ImageComparison = ({ originalImageUrl, processedImageUrl, currentFile, onD
         )}
       </div>
 
-      {processedImageUrl && (
+      {processedImageUrl && showDownload && (
         <div className="download-section">
           <button
             className="download-btn"

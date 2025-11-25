@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 from transparent_background import Remover
 import uvicorn
@@ -88,10 +88,12 @@ async def upload_image(request: Request):
         # Get optional parameters with defaults
         backgroundColor = form_data.get("backgroundColor", "white")
         fileType = form_data.get("fileType", "JPEG")
+        watermark = form_data.get("watermark", "none")
         
         # Normalize and validate parameters
         bg_color = backgroundColor.lower() if backgroundColor else "white"
         output_format = fileType.upper() if fileType else "JPEG"
+        watermark_option = watermark.lower() if watermark else "none"
         
         # Validate file type
         if not hasattr(file, 'content_type') or not file.content_type or not file.content_type.startswith("image/"):
@@ -103,6 +105,9 @@ async def upload_image(request: Request):
         
         if output_format not in ["PNG", "JPEG"]:
             raise HTTPException(status_code=400, detail="fileType must be 'PNG' or 'JPEG'")
+        
+        if watermark_option not in ["none", "blog"]:
+            raise HTTPException(status_code=400, detail="watermark must be 'none' or 'blog'")
         
         # Read image file
         image_data = await file.read()
@@ -172,6 +177,10 @@ async def upload_image(request: Request):
                 rgb_image.paste(processed_image, mask=processed_image.split()[3])
                 processed_image = rgb_image
         
+        # Add watermark if requested
+        if watermark_option == "blog":
+            processed_image = add_pedals_watermark(processed_image)
+        
         processed_image.save(img_byte_arr, format=output_format, quality=95)
         img_byte_arr.seek(0)
         processed_image_bytes = img_byte_arr.read()
@@ -209,6 +218,122 @@ async def upload_image(request: Request):
         print(f"Error details: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+def add_pedals_watermark(image):
+    """
+    Add PEDALS to METAL.com watermark to the bottom right corner of the image.
+    Includes three outlined circles (like pedal knobs) and "PEDALS to METAL.com" text.
+    """
+    # Ensure image is in RGB mode for drawing
+    if image.mode == "RGBA":
+        # Create a white background for watermark
+        watermark_bg = Image.new("RGB", image.size, (255, 255, 255))
+        watermark_bg.paste(image, mask=image.split()[3])
+        image = watermark_bg
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+    
+    # Create a copy to draw on
+    img_with_watermark = image.copy()
+    
+    # Calculate watermark size based on image dimensions
+    img_width, img_height = image.size
+    base_font_size = max(14, int(img_width * 0.025))  # 2.5% of image width, minimum 14px
+    small_font_size = max(10, int(base_font_size * 0.7))  # Smaller font for .com
+    
+    # Try to load fonts, fallback to default if not available
+    try:
+        main_font = ImageFont.truetype("arial.ttf", base_font_size)
+        small_font = ImageFont.truetype("arial.ttf", small_font_size)
+    except:
+        try:
+            main_font = ImageFont.truetype("arialbd.ttf", base_font_size)
+            small_font = ImageFont.truetype("arial.ttf", small_font_size)
+        except:
+            # Fallback to default font
+            main_font = ImageFont.load_default()
+            small_font = ImageFont.load_default()
+    
+    # Create a temporary drawing context to measure text
+    temp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    
+    # Text parts
+    main_text = "PEDALS to METAL"
+    small_text = ".com"
+    
+    # Calculate text bounding boxes
+    main_bbox = temp_draw.textbbox((0, 0), main_text, font=main_font)
+    main_text_width = main_bbox[2] - main_bbox[0]
+    main_text_height = main_bbox[3] - main_bbox[1]
+    
+    small_bbox = temp_draw.textbbox((0, 0), small_text, font=small_font)
+    small_text_width = small_bbox[2] - small_bbox[0]
+    small_text_height = small_bbox[3] - small_bbox[1]
+    
+    # Calculate circle dimensions (three circles like pedal knobs)
+    circle_radius = max(4, int(img_width * 0.008))  # 0.8% of image width, minimum 4px
+    circle_spacing = circle_radius * 2.5  # Space between circles
+    circles_width = (circle_radius * 2 * 3) + (circle_spacing * 2)  # Total width of three circles
+    
+    # Total watermark width (circles or text, whichever is wider)
+    watermark_width = max(circles_width, main_text_width + small_text_width)
+    watermark_height = (circle_radius * 2) + 8 + main_text_height  # Circles + spacing + text
+    
+    # Position: bottom right with padding
+    padding = max(10, int(img_width * 0.02))  # 2% of image width, minimum 10px
+    watermark_x = img_width - watermark_width - padding
+    watermark_y = img_height - watermark_height - padding
+    
+    # Create a semi-transparent overlay using RGBA
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    
+    # Draw semi-transparent background rectangle for better visibility
+    bg_padding = 8
+    bg_rect = [
+        watermark_x - bg_padding,
+        watermark_y - bg_padding,
+        watermark_x + watermark_width + bg_padding,
+        watermark_y + watermark_height + bg_padding
+    ]
+    overlay_draw.rectangle(bg_rect, fill=(0, 0, 0, 150))  # Semi-transparent black background
+    
+    # Composite the overlay onto the image
+    img_rgba = img_with_watermark.convert("RGBA")
+    img_with_watermark = Image.alpha_composite(img_rgba, overlay).convert("RGB")
+    
+    # Draw on the composited image
+    draw = ImageDraw.Draw(img_with_watermark)
+    
+    # Draw three outlined circles (like pedal knobs) at the top
+    circle_y = watermark_y
+    circle_start_x = watermark_x + (watermark_width - circles_width) / 2 + circle_radius
+    
+    for i in range(3):
+        circle_x = circle_start_x + (i * (circle_radius * 2 + circle_spacing))
+        # Draw circle outline (white)
+        draw.ellipse(
+            [
+                circle_x - circle_radius,
+                circle_y - circle_radius,
+                circle_x + circle_radius,
+                circle_y + circle_radius
+            ],
+            outline=(255, 255, 255),
+            width=1
+        )
+    
+    # Draw main text "PEDALS to METAL"
+    text_y = watermark_y + (circle_radius * 2) + 8
+    text_x = watermark_x + (watermark_width - main_text_width - small_text_width) / 2
+    draw.text((text_x, text_y), main_text, fill=(255, 255, 255), font=main_font)
+    
+    # Draw small ".com" text offset to the bottom right
+    com_x = text_x + main_text_width + 2
+    com_y = text_y + (main_text_height - small_text_height) + 2  # Slightly offset down
+    draw.text((com_x, com_y), small_text, fill=(255, 255, 255), font=small_font)
+    
+    return img_with_watermark
 
 def make_checkerboard(w, h, tile=40):
     import numpy as np

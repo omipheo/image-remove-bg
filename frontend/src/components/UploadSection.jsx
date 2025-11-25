@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import '../styles/components/UploadSection.css'
 
-const UploadSection = ({ onFilesSelected, isLoading, onDownloadAll, hasProcessedImages, onStop }) => {
+const UploadSection = ({ onFilesSelected, isLoading, onDownloadAll, hasProcessedImages, onStop, showDownload = true }) => {
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef(null)
   const dropZoneRef = useRef(null)
@@ -81,7 +81,7 @@ const UploadSection = ({ onFilesSelected, isLoading, onDownloadAll, hasProcessed
                   <span className="btn-icon">📤</span>
                   Browse Images
                 </button>
-                {hasProcessedImages && (
+                {hasProcessedImages && showDownload && (
                   <button
                     className="download-all-btn"
                     onClick={onDownloadAll}
