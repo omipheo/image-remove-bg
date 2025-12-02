@@ -14,6 +14,7 @@ const HomePage = () => {
   const [downloadMethod, setDownloadMethod] = useState('zip')
   const [watermark, setWatermark] = useState('blog')
   const [downloadMode, setDownloadMode] = useState('manual')
+  const [concurrency, setConcurrency] = useState(3)
   
   const handleDownloadModeChange = (mode) => {
     setDownloadMode(mode)
@@ -50,7 +51,7 @@ const HomePage = () => {
     if (imageFiles.length === 1) {
       processImage(imageFiles[0], backgroundColor, fileType, watermark, downloadMode)
     } else {
-      processMultipleImages(imageFiles, backgroundColor, fileType, watermark, downloadMode)
+      processMultipleImages(imageFiles, backgroundColor, fileType, watermark, downloadMode, concurrency)
     }
   }
 
@@ -73,11 +74,13 @@ const HomePage = () => {
         downloadMethod={downloadMethod}
         watermark={watermark}
         downloadMode={downloadMode}
+        concurrency={concurrency}
         onFileTypeChange={setFileType}
         onBackgroundColorChange={setBackgroundColor}
         onDownloadMethodChange={setDownloadMethod}
         onWatermarkChange={setWatermark}
         onDownloadModeChange={handleDownloadModeChange}
+        onConcurrencyChange={setConcurrency}
         isLoading={isLoading}
       />
 

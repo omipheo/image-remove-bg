@@ -52,6 +52,103 @@ def get_remover():
     return _remover
 
 
+async def process_single_image(file, bg_color, output_format, watermark_option):
+    """
+    Process a single image: remove background, apply color, and watermark.
+    Returns processed image bytes, mime_type, and filename.
+    """
+    # Read image file
+    if hasattr(file, 'read'):
+        # It's an UploadFile, read it asynchronously
+        image_data = await file.read()
+        filename = getattr(file, 'filename', 'processed_image') or 'processed_image'
+    else:
+        # It's already bytes
+        image_data = file
+        filename = 'processed_image'
+    
+    # Load image as PIL Image
+    input_image = Image.open(io.BytesIO(image_data))
+    
+    # Remove background using transparent-background (InSPyReNet)
+    print(f"Processing image: {filename}, size: {len(image_data)} bytes")
+    
+    try:
+        remover = get_remover()
+        # transparent-background expects PIL Image and returns PIL Image with RGBA
+        print("Calling remover.process()...")
+        processed_image = remover.process(input_image, type='rgba')
+        print("Background removal completed successfully")
+    except Exception as e:
+        import traceback
+        error_msg = f"Error during background removal: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        raise Exception(error_msg)
+    
+    # Ensure the result is in RGBA mode
+    if processed_image.mode != 'RGBA':
+        processed_image = processed_image.convert('RGBA')
+    
+    # Apply background color
+    if bg_color == "transparent":
+        # Create checkerboard pattern for transparent background
+        if processed_image.mode == "RGBA":
+            # Create checkerboard pattern
+            processed_image = add_checkerboard_background(processed_image)
+        elif processed_image.mode != "RGB":
+            processed_image = processed_image.convert("RGB")
+    else:
+        # Convert to RGB with specified background color
+        if processed_image.mode == "RGBA":
+            if bg_color == "white":
+                bg_rgb = (255, 255, 255)
+            else:  # black
+                bg_rgb = (0, 0, 0)
+            
+            background = Image.new("RGB", processed_image.size, bg_rgb)
+            background.paste(processed_image, mask=processed_image.split()[3])  # Use alpha channel as mask
+            processed_image = background
+        elif processed_image.mode != "RGB":
+            processed_image = processed_image.convert("RGB")
+    
+    # Determine output format
+    output_format = "PNG" if output_format.upper() == "PNG" else "JPEG"
+    mime_type = "image/png" if output_format == "PNG" else "image/jpeg"
+    
+    # Convert processed image to bytes
+    img_byte_arr = io.BytesIO()
+    
+    # JPEG doesn't support transparency, so convert to RGB if needed
+    if output_format == "JPEG" and processed_image.mode == "RGBA":
+        # If transparent was requested but JPEG format, use white background
+        if bg_color == "transparent":
+            # For JPEG, we must use a solid background (white)
+            rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
+            rgb_image.paste(processed_image, mask=processed_image.split()[3])
+            processed_image = rgb_image
+        else:
+            # Use white background for JPEG
+            rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
+            rgb_image.paste(processed_image, mask=processed_image.split()[3])
+            processed_image = rgb_image
+    
+    # Add watermark if requested
+    if watermark_option == "blog":
+        processed_image = add_pedals_watermark(processed_image)
+    
+    processed_image.save(img_byte_arr, format=output_format, quality=95)
+    img_byte_arr.seek(0)
+    processed_image_bytes = img_byte_arr.read()
+    print(f"Processed image size: {len(processed_image_bytes)} bytes")
+    
+    # Generate filename
+    file_extension = "png" if output_format == "PNG" else "jpg"
+    processed_filename = filename.rsplit('.', 1)[0] + f"-no-bg.{file_extension}"
+    
+    return processed_image_bytes, mime_type, processed_filename, output_format
+
+
 @app.get("/")
 async def root():
     return {"message": "Image Background Removal API", "status": "running"}
@@ -109,82 +206,10 @@ async def upload_image(request: Request):
         if watermark_option not in ["none", "blog"]:
             raise HTTPException(status_code=400, detail="watermark must be 'none' or 'blog'")
         
-        # Read image file
-        image_data = await file.read()
-        
-        # Load image as PIL Image
-        input_image = Image.open(io.BytesIO(image_data))
-        
-        # Remove background using transparent-background (InSPyReNet)
-        print(f"Processing image: {file.filename}, size: {len(image_data)} bytes")
-        try:
-            remover = get_remover()
-            # transparent-background expects PIL Image and returns PIL Image with RGBA
-            print("Calling remover.process()...")
-            processed_image = remover.process(input_image, type='rgba')
-            print("Background removal completed successfully")
-        except Exception as e:
-            import traceback
-            error_msg = f"Error during background removal: {str(e)}"
-            print(error_msg)
-            print(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=error_msg)
-        
-        # Ensure the result is in RGBA mode
-        if processed_image.mode != 'RGBA':
-            processed_image = processed_image.convert('RGBA')
-        
-        # Apply background color
-        if bg_color == "transparent":
-            # Create checkerboard pattern for transparent background
-            if processed_image.mode == "RGBA":
-                # Create checkerboard pattern
-                processed_image = add_checkerboard_background(processed_image)
-            elif processed_image.mode != "RGB":
-                processed_image = processed_image.convert("RGB")
-        else:
-            # Convert to RGB with specified background color
-            if processed_image.mode == "RGBA":
-                if bg_color == "white":
-                    bg_rgb = (255, 255, 255)
-                else:  # black
-                    bg_rgb = (0, 0, 0)
-                
-                background = Image.new("RGB", processed_image.size, bg_rgb)
-                background.paste(processed_image, mask=processed_image.split()[3])  # Use alpha channel as mask
-                processed_image = background
-            elif processed_image.mode != "RGB":
-                processed_image = processed_image.convert("RGB")
-        
-        # Determine output format
-        output_format = "PNG" if output_format.upper() == "PNG" else "JPEG"
-        mime_type = "image/png" if output_format == "PNG" else "image/jpeg"
-        
-        # Convert processed image to bytes
-        img_byte_arr = io.BytesIO()
-        
-        # JPEG doesn't support transparency, so convert to RGB if needed
-        if output_format == "JPEG" and processed_image.mode == "RGBA":
-            # If transparent was requested but JPEG format, use white background
-            if bg_color == "transparent":
-                # For JPEG, we must use a solid background (white)
-                rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
-                rgb_image.paste(processed_image, mask=processed_image.split()[3])
-                processed_image = rgb_image
-            else:
-                # Use white background for JPEG
-                rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
-                rgb_image.paste(processed_image, mask=processed_image.split()[3])
-                processed_image = rgb_image
-        
-        # Add watermark if requested
-        if watermark_option == "blog":
-            processed_image = add_pedals_watermark(processed_image)
-        
-        processed_image.save(img_byte_arr, format=output_format, quality=95)
-        img_byte_arr.seek(0)
-        processed_image_bytes = img_byte_arr.read()
-        print(f"Processed image size: {len(processed_image_bytes)} bytes")
+        # Process the image using helper function
+        processed_image_bytes, mime_type, processed_filename, output_format = await process_single_image(
+            file, bg_color, output_format, watermark_option
+        )
         
         # Convert to base64 for frontend
         import base64
@@ -196,10 +221,9 @@ async def upload_image(request: Request):
         
         # Store the processed image (in production, use proper storage)
         image_id = f"img_{len(processed_images)}"
-        file_extension = "png" if output_format == "PNG" else "jpg"
         processed_images[image_id] = {
             "data": processed_image_bytes,
-            "filename": (file.filename or "processed_image").rsplit('.', 1)[0] + f"-no-bg.{file_extension}",
+            "filename": processed_filename,
             "format": output_format,
             "mime_type": mime_type
         }
@@ -218,6 +242,126 @@ async def upload_image(request: Request):
         print(f"Error details: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+
+@app.post("/api/upload-batch")
+async def upload_images_batch(request: Request):
+    """
+    Upload multiple images and remove their backgrounds in a single request.
+    Returns an array of processed images.
+    
+    Parameters:
+    - images: Multiple image files (form field name: "images")
+    - backgroundColor: "transparent", "white", or "black"
+    - fileType: "PNG" or "JPEG"
+    """
+    try:
+        print("DEBUG: Batch upload endpoint called")
+        # Parse form data
+        form_data = await request.form()
+        
+        print(f"DEBUG: form_data keys: {list(form_data.keys())}")
+        
+        # Get files from form data (multiple files with same field name)
+        # In Starlette/FastAPI, getlist() returns a list of values for the key
+        files = form_data.getlist("images")
+        print(f"DEBUG: Found {len(files) if files else 0} files")
+        
+        if not files or len(files) == 0:
+            print("DEBUG: No files found in form_data")
+            raise HTTPException(status_code=400, detail="At least one image file is required")
+        
+        # Get optional parameters with defaults
+        backgroundColor = form_data.get("backgroundColor", "white")
+        fileType = form_data.get("fileType", "JPEG")
+        watermark = form_data.get("watermark", "none")
+        
+        # Normalize and validate parameters
+        bg_color = backgroundColor.lower() if backgroundColor else "white"
+        output_format = fileType.upper() if fileType else "JPEG"
+        watermark_option = watermark.lower() if watermark else "none"
+        
+        # Validate parameters
+        if bg_color not in ["transparent", "white", "black"]:
+            raise HTTPException(status_code=400, detail="backgroundColor must be 'transparent', 'white', or 'black'")
+        
+        if output_format not in ["PNG", "JPEG"]:
+            raise HTTPException(status_code=400, detail="fileType must be 'PNG' or 'JPEG'")
+        
+        if watermark_option not in ["none", "blog"]:
+            raise HTTPException(status_code=400, detail="watermark must be 'none' or 'blog'")
+        
+        # Validate all files are images
+        for file in files:
+            if not isinstance(file, (UploadFile, StarletteUploadFile)):
+                if not hasattr(file, 'read') or not hasattr(file, 'content_type'):
+                    raise HTTPException(status_code=400, detail="Invalid file type")
+            if not hasattr(file, 'content_type') or not file.content_type or not file.content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail="All files must be images")
+        
+        print(f"Processing batch of {len(files)} images")
+        
+        # Process all images
+        results = []
+        import base64
+        
+        for idx, file in enumerate(files):
+            try:
+                # Process the image
+                processed_image_bytes, mime_type, processed_filename, output_format_final = await process_single_image(
+                    file, bg_color, output_format, watermark_option
+                )
+                
+                # Convert to base64
+                image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
+                image_url = f"data:{mime_type};base64,{image_base64}"
+                
+                # Store the processed image
+                image_id = f"img_{len(processed_images)}"
+                processed_images[image_id] = {
+                    "data": processed_image_bytes,
+                    "filename": processed_filename,
+                    "format": output_format_final,
+                    "mime_type": mime_type
+                }
+                
+                results.append({
+                    "imageUrl": image_url,
+                    "imageId": image_id,
+                    "filename": getattr(file, 'filename', f'image_{idx}') or f'image_{idx}'
+                })
+                
+                print(f"Successfully processed image {idx + 1}/{len(files)}")
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error processing image {idx + 1} ({getattr(file, 'filename', 'unknown')}): {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
+                # Continue processing other images, but add error to result
+                results.append({
+                    "error": error_msg,
+                    "filename": getattr(file, 'filename', f'image_{idx}') or f'image_{idx}'
+                })
+        
+        print(f"Batch processing completed: {len([r for r in results if 'error' not in r])} successful, {len([r for r in results if 'error' in r])} failed")
+        
+        return {
+            "results": results,
+            "total": len(files),
+            "successful": len([r for r in results if 'error' not in r]),
+            "failed": len([r for r in results if 'error' in r])
+        }
+        
+    except HTTPException as e:
+        print(f"HTTPException: {e.detail}")
+        raise
+    except Exception as e:
+        import traceback
+        print(f"Error details: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error processing batch: {str(e)}")
+
 
 def add_pedals_watermark(image):
     """

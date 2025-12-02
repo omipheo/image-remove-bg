@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import JSZip from 'jszip'
-import { uploadImageToBackend, downloadImageFromBackend } from '../services/api'
+import { uploadImageToBackend, uploadImagesBatchToBackend, downloadImageFromBackend } from '../services/api'
 import { readImageAsDataURL, downloadFile, generateDownloadFilename, dataURLToBlob, addWatermark } from '../utils/fileUtils'
 import { API_CONFIG } from '../config/api'
 
@@ -97,7 +97,7 @@ export const useImageProcessing = () => {
     }
   }
 
-  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual') => {
+  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual', concurrency = 3) => {
     const imageFiles = files.filter(file => file.type.startsWith('image/'))
     if (imageFiles.length === 0) {
       setError('Please select at least one image file')
@@ -121,7 +121,7 @@ export const useImageProcessing = () => {
       }
     }
 
-    // Process remaining images in background
+    // Process remaining images using batch upload
     if (imageFiles.length > 1) {
       setIsLoading(true)
       // Clear previous processed images
@@ -129,66 +129,93 @@ export const useImageProcessing = () => {
       
       // Collect all processed images for auto-download
       const allProcessedImagesForDownload = []
-
-      for (let i = 1; i < imageFiles.length; i++) {
-        if (isCancelledRef.current) {
-          break
-        }
-
+      
+      // Get remaining images (skip first one as it's already processed)
+      const remainingImages = imageFiles.slice(1)
+      
+      if (API_CONFIG.USE_BACKEND) {
+        // Use batch upload for all remaining images
         try {
-          const file = imageFiles[i]
-          const originalUrl = await readImageAsDataURL(file)
-
+          // Read original URLs for all remaining images first
+          const originalUrlsMap = new Map()
+          await Promise.all(remainingImages.map(async (file) => {
+            const originalUrl = await readImageAsDataURL(file)
+            originalUrlsMap.set(file, originalUrl)
+          }))
+          
           if (isCancelledRef.current) {
-            break
+            setIsLoading(false)
+            return
           }
-
-          if (API_CONFIG.USE_BACKEND) {
-            const result = await uploadImageToBackend(file, backgroundColor, fileType, abortControllerRef.current.signal)
+          
+          // Process remaining images in batches based on concurrency setting
+          const batchSize = Math.max(1, Math.min(concurrency, 100)) // Clamp between 1 and 100
+          
+          for (let i = 0; i < remainingImages.length; i += batchSize) {
+            if (isCancelledRef.current) {
+              break
+            }
+            
+            const batch = remainingImages.slice(i, i + batchSize)
+            
+            // Upload batch to backend
+            const batchResult = await uploadImagesBatchToBackend(
+              batch,
+              backgroundColor,
+              fileType,
+              abortControllerRef.current.signal
+            )
             
             if (isCancelledRef.current) {
               break
             }
             
-            // Apply watermark if needed
-            let processedUrl = result.imageUrl
-            if (watermark === 'blog') {
-              processedUrl = await addWatermark(result.imageUrl, backgroundColor)
+            // Process results and apply watermarks
+            for (let j = 0; j < batchResult.results.length; j++) {
+              const result = batchResult.results[j]
+              const file = batch[j]
+              
+              if (result.error) {
+                console.error(`Error processing ${file.name}:`, result.error)
+                continue
+              }
+              
+              const originalUrl = originalUrlsMap.get(file)
+              
+              // Apply watermark if needed
+              let processedUrl = result.imageUrl
+              if (watermark === 'blog') {
+                processedUrl = await addWatermark(result.imageUrl, backgroundColor)
+              }
+              
+              const processedImage = {
+                file,
+                originalUrl,
+                processedUrl: processedUrl,
+                imageId: result.imageId
+              }
+              
+              allProcessedImagesForDownload.push(processedImage)
+              setProcessedImages(prev => [...prev, processedImage])
             }
-            
-            // Add image to state immediately as it's processed
-            const newImage = {
-              file,
-              originalUrl,
-              processedUrl: processedUrl,
-              imageId: result.imageId
-            }
-            
-            // Store for auto-download
-            allProcessedImagesForDownload.push(newImage)
-            
-            // Use functional update to add to existing array
-            setProcessedImages(prev => [...prev, newImage])
-          } else {
-            // Add image to state immediately as it's processed
-            const newImage = {
-              file,
-              originalUrl,
-              processedUrl: originalUrl
-            }
-            
-            // Store for auto-download
-            allProcessedImagesForDownload.push(newImage)
-            
-            // Use functional update to add to existing array
-            setProcessedImages(prev => [...prev, newImage])
           }
         } catch (err) {
           if (err.name === 'AbortError' || isCancelledRef.current) {
-            break
+            setIsLoading(false)
+            return
           }
-          console.error(`Error processing ${imageFiles[i].name}:`, err)
+          console.error('Error in batch processing:', err)
+          setError(err.message || 'Error processing images')
         }
+      } else {
+        // Local mode - just use original images
+        const localResults = remainingImages.map(file => ({
+          file,
+          originalUrl: null,
+          processedUrl: null
+        }))
+        allProcessedImagesForDownload.push(...localResults)
+        setProcessedImages(localResults)
       }
 
       setIsLoading(false)

@@ -46,6 +46,58 @@ export const uploadImageToBackend = async (file, bgColor, outputFormat, signal =
 }
 
 /**
+ * Upload multiple images to backend for batch processing
+ */
+export const uploadImagesBatchToBackend = async (files, bgColor, outputFormat, signal = null) => {
+  const formData = new FormData()
+  
+  // Append all images with the same field name "images"
+  files.forEach(file => {
+    formData.append('images', file)
+  })
+  
+  formData.append('backgroundColor', bgColor)
+  formData.append('fileType', outputFormat)
+  
+  try {
+    console.log(`Uploading batch of ${files.length} images to:`, `${API_CONFIG.BASE_URL}/api/upload-batch`)
+    const fetchOptions = {
+      method: 'POST',
+      body: formData
+    }
+    
+    if (signal) {
+      fetchOptions.signal = signal
+    }
+    
+    const response = await fetch(`${API_CONFIG.BASE_URL}/api/upload-batch`, fetchOptions)
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Batch upload failed' }))
+      throw new Error(errorData.detail || `Batch upload failed with status ${response.status}`)
+    }
+    
+    const data = await response.json()
+    return {
+      results: data.results,
+      total: data.total,
+      successful: data.successful,
+      failed: data.failed
+    }
+  } catch (error) {
+    // Handle abort error
+    if (error.name === 'AbortError') {
+      throw error
+    }
+    // More detailed error message
+    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+      throw new Error(`Cannot connect to backend. Make sure the backend is running on ${API_CONFIG.BASE_URL || 'http://localhost:8000'}`)
+    }
+    throw new Error(`Batch upload failed: ${error.message}`)
+  }
+}
+
+/**
  * Download processed image from backend
  */
 export const downloadImageFromBackend = async (imageId, outputFormat) => {
