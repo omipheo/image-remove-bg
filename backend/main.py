@@ -9,6 +9,9 @@ from transparent_background import Remover
 import uvicorn
 import os
 from dotenv import load_dotenv
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,6 +39,9 @@ processed_images = {}
 # Initialize transparent-background remover (lazy load on first use)
 _remover = None
 
+# Thread pool for CPU-bound operations
+_executor = ThreadPoolExecutor(max_workers=4)
+
 def get_remover():
     """Lazy load the remover to avoid loading model on startup"""
     global _remover
@@ -51,34 +57,35 @@ def get_remover():
             raise
     return _remover
 
-
-async def process_single_image(file, bg_color, output_format, watermark_option):
-    """
-    Process a single image: remove background, apply color, and watermark.
-    Returns processed image bytes, mime_type, and filename.
-    """
-    # Read image file
-    if hasattr(file, 'read'):
-        # It's an UploadFile, read it asynchronously
-        image_data = await file.read()
-        filename = getattr(file, 'filename', 'processed_image') or 'processed_image'
-    else:
-        # It's already bytes
-        image_data = file
-        filename = 'processed_image'
+def optimize_image_size(image, max_dimension=2048):
+    """Resize image if it's too large to speed up processing"""
+    width, height = image.size
+    if width <= max_dimension and height <= max_dimension:
+        return image
     
+    # Calculate new dimensions maintaining aspect ratio
+    if width > height:
+        new_width = max_dimension
+        new_height = int(height * (max_dimension / width))
+    else:
+        new_height = max_dimension
+        new_width = int(width * (max_dimension / height))
+    
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+
+def _process_image_sync(image_data, bg_color, output_format, watermark_option, filename='processed_image'):
+    """Synchronous image processing function for thread pool execution"""
     # Load image as PIL Image
     input_image = Image.open(io.BytesIO(image_data))
     
-    # Remove background using transparent-background (InSPyReNet)
-    print(f"Processing image: {filename}, size: {len(image_data)} bytes")
+    # Optimize image size for faster processing
+    input_image = optimize_image_size(input_image, max_dimension=2048)
     
     try:
         remover = get_remover()
         # transparent-background expects PIL Image and returns PIL Image with RGBA
-        print("Calling remover.process()...")
         processed_image = remover.process(input_image, type='rgba')
-        print("Background removal completed successfully")
     except Exception as e:
         import traceback
         error_msg = f"Error during background removal: {str(e)}"
@@ -137,16 +144,47 @@ async def process_single_image(file, bg_color, output_format, watermark_option):
     if watermark_option == "blog":
         processed_image = add_pedals_watermark(processed_image)
     
-    processed_image.save(img_byte_arr, format=output_format, quality=95)
+    # Use lower quality for JPEG to reduce size and processing time
+    quality = 85 if output_format == "JPEG" else 95
+    processed_image.save(img_byte_arr, format=output_format, quality=quality, optimize=True)
     img_byte_arr.seek(0)
     processed_image_bytes = img_byte_arr.read()
-    print(f"Processed image size: {len(processed_image_bytes)} bytes")
     
     # Generate filename
     file_extension = "png" if output_format == "PNG" else "jpg"
     processed_filename = filename.rsplit('.', 1)[0] + f"-no-bg.{file_extension}"
     
     return processed_image_bytes, mime_type, processed_filename, output_format
+
+async def process_single_image(file, bg_color, output_format, watermark_option):
+    """
+    Process a single image: remove background, apply color, and watermark.
+    Returns processed image bytes, mime_type, and filename.
+    Uses thread pool for CPU-bound operations.
+    """
+    # Read image file
+    if hasattr(file, 'read'):
+        # It's an UploadFile, read it asynchronously
+        image_data = await file.read()
+        filename = getattr(file, 'filename', 'processed_image') or 'processed_image'
+    else:
+        # It's already bytes
+        image_data = file
+        filename = 'processed_image'
+    
+    # Run CPU-bound processing in thread pool
+    loop = asyncio.get_event_loop()
+    processed_image_bytes, mime_type, processed_filename, output_format_final = await loop.run_in_executor(
+        _executor,
+        _process_image_sync,
+        image_data,
+        bg_color,
+        output_format,
+        watermark_option,
+        filename
+    )
+    
+    return processed_image_bytes, mime_type, processed_filename, output_format_final
 
 
 @app.get("/")
@@ -299,25 +337,45 @@ async def upload_images_batch(request: Request):
             if not hasattr(file, 'content_type') or not file.content_type or not file.content_type.startswith("image/"):
                 raise HTTPException(status_code=400, detail="All files must be images")
         
-        print(f"Processing batch of {len(files)} images")
+        print(f"Processing batch of {len(files)} images in parallel")
+        start_time = time.time()
         
-        # Process all images
-        results = []
-        import base64
+        # Read all files first (I/O bound, can be parallelized)
+        async def read_file_data(file, idx):
+            if hasattr(file, 'read'):
+                image_data = await file.read()
+                filename = getattr(file, 'filename', f'image_{idx}') or f'image_{idx}'
+            else:
+                image_data = file
+                filename = f'image_{idx}'
+            return image_data, filename, file
         
-        for idx, file in enumerate(files):
+        # Read all files in parallel
+        file_data_tasks = [read_file_data(file, idx) for idx, file in enumerate(files)]
+        file_data_list = await asyncio.gather(*file_data_tasks)
+        
+        # Process all images in parallel using asyncio.gather
+        async def process_with_index(image_data, filename, original_file, idx):
             try:
-                # Process the image
-                processed_image_bytes, mime_type, processed_filename, output_format_final = await process_single_image(
-                    file, bg_color, output_format, watermark_option
+                # Process the image directly using the sync function in thread pool
+                loop = asyncio.get_event_loop()
+                processed_image_bytes, mime_type, processed_filename, output_format_final = await loop.run_in_executor(
+                    _executor,
+                    _process_image_sync,
+                    image_data,
+                    bg_color,
+                    output_format,
+                    watermark_option,
+                    filename
                 )
                 
-                # Convert to base64
+                # Convert to base64 (can be optimized further)
+                import base64
                 image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
                 image_url = f"data:{mime_type};base64,{image_base64}"
                 
                 # Store the processed image
-                image_id = f"img_{len(processed_images)}"
+                image_id = f"img_{len(processed_images) + idx}"
                 processed_images[image_id] = {
                     "data": processed_image_bytes,
                     "filename": processed_filename,
@@ -325,26 +383,32 @@ async def upload_images_batch(request: Request):
                     "mime_type": mime_type
                 }
                 
-                results.append({
+                return {
                     "imageUrl": image_url,
                     "imageId": image_id,
-                    "filename": getattr(file, 'filename', f'image_{idx}') or f'image_{idx}'
-                })
-                
-                print(f"Successfully processed image {idx + 1}/{len(files)}")
-                
+                    "filename": filename
+                }
             except Exception as e:
                 import traceback
-                error_msg = f"Error processing image {idx + 1} ({getattr(file, 'filename', 'unknown')}): {str(e)}"
+                error_msg = f"Error processing image {idx + 1} ({filename}): {str(e)}"
                 print(error_msg)
                 print(traceback.format_exc())
-                # Continue processing other images, but add error to result
-                results.append({
+                return {
                     "error": error_msg,
-                    "filename": getattr(file, 'filename', f'image_{idx}') or f'image_{idx}'
-                })
+                    "filename": filename
+                }
         
-        print(f"Batch processing completed: {len([r for r in results if 'error' not in r])} successful, {len([r for r in results if 'error' in r])} failed")
+        # Process all images in parallel
+        processing_tasks = [
+            process_with_index(image_data, filename, original_file, idx)
+            for idx, (image_data, filename, original_file) in enumerate(file_data_list)
+        ]
+        results = await asyncio.gather(*processing_tasks)
+        
+        elapsed_time = time.time() - start_time
+        successful = len([r for r in results if 'error' not in r])
+        failed = len([r for r in results if 'error' in r])
+        print(f"Batch processing completed in {elapsed_time:.2f}s: {successful} successful, {failed} failed ({len(files)/elapsed_time:.2f} images/sec)")
         
         return {
             "results": results,
@@ -584,13 +648,16 @@ if __name__ == "__main__":
     # Use 0.0.0.0 for production (allows external connections)
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting server on http://{host}:{port}")
+    workers = int(os.getenv("WORKERS", 1))  # Number of worker processes
+    print(f"Starting server on http://{host}:{port} with {workers} worker(s)")
     uvicorn.run(
         app, 
         host=host, 
         port=port,
-        timeout_keep_alive=300,  # Increase timeout for long-running requests
-        limit_concurrency=10,     # Limit concurrent requests
-        limit_max_requests=100    # Limit total requests
+        workers=workers,
+        timeout_keep_alive=600,  # Increase timeout for batch processing
+        limit_concurrency=200,    # Increase concurrent request limit
+        limit_max_requests=1000,  # Increase total request limit
+        backlog=2048             # Increase connection backlog
     )
 

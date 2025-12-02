@@ -103,7 +103,7 @@ const OptionsSection = ({ fileType, backgroundColor, downloadMethod, watermark, 
           onChange={handleConcurrencyChange}
           onBlur={handleConcurrencyBlur}
           disabled={isLoading}
-          title="Number of images to process simultaneously (1-10)"
+          title="Number of images to process simultaneously (1-100)"
         />
       </div>
 
