@@ -7,11 +7,11 @@ const getApiBaseUrl = () => {
     return import.meta.env.VITE_API_BASE_URL
   }
   
-  // In development mode (npm run dev), always use localhost:8001
+  // In development mode (npm run dev), always use localhost:8000
   // import.meta.env.DEV is true when running `npm run dev`
   // import.meta.env.PROD is true when running `npm run build` and serving the built files
   if (import.meta.env.DEV || import.meta.env.MODE === 'development') {
-    return 'http://localhost:8001'
+    return 'http://localhost:8000'
   }
   
   // In production build, use relative URLs (nginx will proxy /api to backend)

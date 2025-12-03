@@ -19,10 +19,28 @@ load_dotenv()
 app = FastAPI(title="Image Background Removal API")
 
 # Get CORS origins from environment variable or use defaults
-cors_origins = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
-).split(",")
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env:
+    cors_origins = cors_origins_env.split(",")
+else:
+    # Default origins including localhost (for SSH port forwarding) and HTTPS
+    # Note: Vast.ai uses random public ports, so we include common port patterns
+    cors_origins = [
+        "http://localhost",
+        "http://localhost:80",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:80",
+        "https://localhost",
+        "https://127.0.0.1",
+        "http://161.184.141.187",
+        "https://161.184.141.187",
+        # Vast.ai mapped ports (update if ports change)
+        "http://161.184.141.187:43752",
+        "https://161.184.141.187:43930"
+    ]
 
 # Configure CORS to allow frontend requests
 app.add_middleware(
