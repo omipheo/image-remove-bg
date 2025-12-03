@@ -18,7 +18,7 @@ module.exports = {
     time: true,
     autorestart: true,
     watch: false,
-    max_memory_restart: '4G',  // Increased for PyTorch model processing
+          max_memory_restart: '32G',  // Increased to 32GB to maximize memory utilization (362GB available)
     merge_logs: true,
     kill_timeout: 10000,
     wait_ready: true,

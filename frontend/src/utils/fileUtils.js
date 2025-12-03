@@ -43,6 +43,24 @@ export const filterImageFiles = (files) => {
 }
 
 /**
+ * Convert blob URL to data URL (for secure display)
+ */
+export const blobURLToDataURL = async (blobUrl) => {
+  try {
+    const response = await fetch(blobUrl)
+    const blob = await response.blob()
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(new Error('Failed to convert blob URL to data URL'))
+      reader.readAsDataURL(blob)
+    })
+  } catch (err) {
+    throw new Error(`Failed to convert blob URL: ${err.message}`)
+  }
+}
+
+/**
  * Convert data URL to blob
  */
 export const dataURLToBlob = (dataURL) => {

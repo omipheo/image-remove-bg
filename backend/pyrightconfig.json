@@ -1,0 +1,23 @@
+{
+    "venvPath": "/root/image-remove-bg/backend",
+    "venv": "venv",
+    "pythonVersion": "3.12",
+    "pythonPlatform": "Linux",
+    "executionEnvironments": [
+        {
+            "root": "/root/image-remove-bg/backend",
+            "pythonVersion": "3.12",
+            "extraPaths": [
+                "/root/image-remove-bg/backend"
+            ]
+        }
+    ],
+    "include": [
+        "."
+    ],
+    "exclude": [
+        "**/__pycache__",
+        "**/node_modules"
+    ]
+}
+
