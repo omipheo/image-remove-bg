@@ -4,14 +4,15 @@ import asyncio
 import json
 import time
 import io
-from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Request, WebSocket, WebSocketDisconnect
+import zipfile
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from PIL import Image
-from typing import Optional
+from typing import Optional, List
 
 from image_processor import process_image_sync
-from storage import store_image, get_image, get_latest_image
+from storage import store_image, get_image, get_latest_image, create_or_update_progressive_zip, get_progressive_zip, cleanup_progressive_zip
 from workers import (
     get_executor, get_gpu_semaphores, get_processing_queue, get_batch_queue,
     get_batch_processing_lock, get_current_batch_processing, set_current_batch_processing
@@ -197,7 +198,7 @@ async def upload_images_batch(request: Request):
         file_data_list = await asyncio.gather(*file_data_tasks)
         
         # Process all images in parallel using asyncio.gather with GPU load balancing
-        # rembg sessions support batch processing and are more stable than transparent_background
+        # withoutbg supports native batch processing and is more stable than transparent_background
         # We still limit concurrency per GPU for stability
         CHUNK_SIZE = 108  # Process 24 images per chunk (matches recommended frontend batch size)
         
@@ -396,6 +397,90 @@ async def download_image(imageId: str = None, fileType: str = None):
         raise HTTPException(status_code=500, detail=f"Error downloading image: {str(e)}")
 
 
+@router.get("/api/download-zip")
+async def download_images_as_zip(imageIds: str = Query(..., description="Comma-separated list of image IDs")):
+    """
+    Download multiple processed images as a ZIP file (server-side ZIP creation for faster downloads)
+    """
+    try:
+        # Parse image IDs from query parameter
+        image_id_list = [img_id.strip() for img_id in imageIds.split(',') if img_id.strip()]
+        
+        if not image_id_list:
+            raise HTTPException(status_code=400, detail="No image IDs provided")
+        
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for image_id in image_id_list:
+                try:
+                    # Get image from storage
+                    image_data = get_image(image_id)
+                    
+                    if not image_data:
+                        print(f"Warning: Image {image_id} not found, skipping")
+                        continue
+                    
+                    # Add image to ZIP with its filename
+                    zip_file.writestr(image_data["filename"], image_data["data"])
+                    
+                except Exception as e:
+                    print(f"Error adding image {image_id} to ZIP: {e}")
+                    continue
+        
+        # Check if ZIP has any files
+        if zip_buffer.tell() == 0:
+            raise HTTPException(status_code=404, detail="No valid images found to include in ZIP")
+        
+        # Prepare ZIP for download
+        zip_buffer.seek(0)
+        zip_filename = f"processed-images-{int(time.time())}.zip"
+        
+        return Response(
+            content=zip_buffer.read(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_filename}"',
+                "Content-Type": "application/zip"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating ZIP file: {str(e)}")
+
+
+@router.get("/api/download-progressive-zip")
+async def download_progressive_zip(sessionId: str = Query(..., description="Session ID for the progressive ZIP")):
+    """
+    Download the progressive ZIP file for a session (ZIP is built as images are processed)
+    """
+    try:
+        from storage import get_progressive_zip
+        
+        zip_data = get_progressive_zip(sessionId)
+        
+        if not zip_data:
+            raise HTTPException(status_code=404, detail=f"Progressive ZIP not found for session {sessionId}")
+        
+        zip_filename = f"processed-images-{sessionId}.zip"
+        
+        return Response(
+            content=zip_data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_filename}"',
+                "Content-Type": "application/zip"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading progressive ZIP: {str(e)}")
+
+
 @router.get("/api/health")
 async def health_check():
     """Health check endpoint"""
@@ -411,6 +496,7 @@ async def websocket_process_images(websocket: WebSocket):
     batch_counter = 0
     current_batch_images = []  # Current batch being uploaded
     batch_completion_trackers = {}  # Track batch completion: {batch_id: {total, completed, results}}
+    session_id = f"session_{int(time.time())}_{id(websocket)}"  # Unique session ID for progressive ZIP
     
     try:
         # Receive configuration first
@@ -420,11 +506,24 @@ async def websocket_process_images(websocket: WebSocket):
         watermark_option = config_data.get("watermark", "none")
         batch_size = config_data.get("batchSize", 20)  # Default batch size
         
-        print(f"WebSocket connection established. Config: bg={bg_color}, format={output_format}, watermark={watermark_option}, batchSize={batch_size}")
+        print(f"WebSocket connection established. Session: {session_id}, Config: bg={bg_color}, format={output_format}, watermark={watermark_option}, batchSize={batch_size}")
         
         async def send_result(result):
             """Callback to send result via WebSocket"""
-            await websocket.send_json(result)
+            try:
+                # Add progressive ZIP info to result
+                result["sessionId"] = session_id
+                result["zipUrl"] = f"/api/download-progressive-zip?sessionId={session_id}"
+                await websocket.send_json(result)
+            except RuntimeError as e:
+                # WebSocket is closed, but image is still stored - just log the error
+                if "close message has been sent" in str(e):
+                    print(f"Warning: WebSocket closed, cannot send result for task {result.get('taskId')}, but image is stored")
+                else:
+                    raise
+            except Exception as e:
+                # Other errors - log but don't crash
+                print(f"Error sending result via WebSocket: {e}")
         
         batch_queue = get_batch_queue()
         
@@ -434,6 +533,14 @@ async def websocket_process_images(websocket: WebSocket):
             message = await websocket.receive()
             
             if message["type"] == "websocket.disconnect":
+                # Don't cleanup immediately - delay cleanup to allow frontend to download ZIP
+                # Cleanup will happen after 5 minutes via a background task
+                import asyncio
+                async def delayed_cleanup():
+                    await asyncio.sleep(300)  # 5 minutes
+                    cleanup_progressive_zip(session_id)
+                    print(f"Cleaned up progressive ZIP for session {session_id} after delay")
+                asyncio.create_task(delayed_cleanup())
                 break
             
             if message["type"] == "websocket.receive":
@@ -501,6 +608,21 @@ async def websocket_process_images(websocket: WebSocket):
                                 batch_tracker["completed"] += 1
                                 batch_tracker["results"].append(result)
                                 
+                                # Add image to progressive ZIP if processing was successful
+                                if result.get("success") and result.get("imageId"):
+                                    try:
+                                        image_data = get_image(result["imageId"])
+                                        if image_data:
+                                            create_or_update_progressive_zip(
+                                                session_id,
+                                                result["imageId"],
+                                                image_data["data"],
+                                                image_data["filename"]
+                                            )
+                                            print(f"Added image {result['imageId']} to progressive ZIP for session {session_id}")
+                                    except Exception as e:
+                                        print(f"Error adding image to progressive ZIP: {e}")
+                                
                                 # Send individual result
                                 await send_result(result)
                                 
@@ -517,11 +639,14 @@ async def websocket_process_images(websocket: WebSocket):
                                         "batchId": batch_id,
                                         "total": batch_tracker["total"],
                                         "successful": successful,
-                                        "failed": failed
+                                        "failed": failed,
+                                        "sessionId": session_id,
+                                        "zipUrl": f"/api/download-progressive-zip?sessionId={session_id}"
                                     })
                                     print(f"Batch {batch_id} processing complete - batch_complete message sent")
                             
                             # Add batch to processing queue (will be processed sequentially)
+                            print(f"Adding batch {batch_id} to queue with {len(current_batch_images)} images")
                             await batch_queue.put((
                                 batch_id,
                                 current_batch_images,
@@ -530,6 +655,7 @@ async def websocket_process_images(websocket: WebSocket):
                                 watermark_option,
                                 batch_result_callback
                             ))
+                            print(f"Batch {batch_id} added to queue successfully")
                             
                             # Clear current batch (ready for next batch upload)
                             current_batch_images = []
@@ -564,10 +690,24 @@ async def websocket_process_images(websocket: WebSocket):
     
     except WebSocketDisconnect:
         print("WebSocket client disconnected")
+        # Delay cleanup to allow frontend to download ZIP (5 minutes)
+        import asyncio
+        async def delayed_cleanup():
+            await asyncio.sleep(300)  # 5 minutes
+            cleanup_progressive_zip(session_id)
+            print(f"Cleaned up progressive ZIP for session {session_id} after delay")
+        asyncio.create_task(delayed_cleanup())
     except Exception as e:
         import traceback
         print(f"WebSocket error: {e}")
         print(traceback.format_exc())
+        # Delay cleanup to allow frontend to download ZIP (5 minutes)
+        import asyncio
+        async def delayed_cleanup():
+            await asyncio.sleep(300)  # 5 minutes
+            cleanup_progressive_zip(session_id)
+            print(f"Cleaned up progressive ZIP for session {session_id} after delay")
+        asyncio.create_task(delayed_cleanup())
         try:
             await websocket.send_json({
                 "type": "error",
@@ -576,6 +716,8 @@ async def websocket_process_images(websocket: WebSocket):
         except:
             pass
     finally:
+        # Don't cleanup immediately - delay to allow ZIP download
+        # Cleanup will happen via delayed_cleanup tasks above
         try:
             await websocket.close()
         except:

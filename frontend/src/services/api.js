@@ -46,6 +46,28 @@ export const downloadImageFromBackend = async (imageIdOrUrl, fileType) => {
 }
 
 /**
+ * Download multiple images as ZIP from backend (server-side ZIP creation)
+ */
+export const downloadImagesAsZip = async (imageIds) => {
+  const imageIdsParam = Array.isArray(imageIds) ? imageIds.join(',') : imageIds
+  const response = await fetch(`${API_CONFIG.BASE_URL}/api/download-zip?imageIds=${encodeURIComponent(imageIdsParam)}`)
+  
+  if (!response.ok) {
+    throw new Error(`Failed to download ZIP: ${response.statusText}`)
+  }
+  
+  const blob = await response.blob()
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `processed-images-${Date.now()}.zip`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
+}
+
+/**
  * Upload batch of images to backend (legacy, now uses WebSocket)
  */
 export const uploadImagesBatchToBackend = async (files, backgroundColor, fileType, watermark) => {
@@ -115,16 +137,30 @@ export class ImageProcessingWebSocket {
                 task.status = 'queued'
               }
             } else if (data.type === 'batch_started' || data.type === 'batch_queued') {
-              // Batch started/queued
-              console.log(`Batch ${data.batchId} ${data.type === 'batch_started' ? 'upload started' : 'queued for processing'}`)
+              // Batch started/queued - no action needed
             } else if (data.type === 'batch_complete') {
               // Batch processing complete (all individual results already received)
-              console.log(`Batch ${data.batchId} complete: ${data.successful} successful, ${data.failed} failed`)
-              // The batch resolve is already called when all individual results are received
-            } else if (data.success !== undefined) {
-              // Processing result
+              // Send batch_complete to onResult callback for auto-download trigger
+              if (this.onResult) {
+                try {
+                  this.onResult(data)
+                } catch (err) {
+                  console.error('Error in onResult callback for batch_complete:', err)
+                }
+              }
+            } else if (data.type === 'image_processed' || data.success !== undefined) {
+              // Processing result - send immediately to onResult callback for real-time display
+              if (this.onResult) {
+                try {
+                  this.onResult(data)
+                } catch (err) {
+                  console.error('Error in onResult callback:', err)
+                }
+              }
+              
+              // Also handle task resolution for batch completion tracking
               const taskId = data.taskId
-              if (this.pendingTasks.has(taskId)) {
+              if (taskId !== undefined && this.pendingTasks.has(taskId)) {
                 const task = this.pendingTasks.get(taskId)
                 
                 if (data.success) {
@@ -155,19 +191,18 @@ export class ImageProcessingWebSocket {
                     this.pendingTasks.delete(taskId)
                   }
                 }
-                
-                // Call result callback
-                if (this.onResult) {
-                  this.onResult(data)
-                }
               }
             } else if (data.type === 'error') {
               if (this.onError) {
                 this.onError(new Error(data.message))
               }
+            } else {
+              // Unknown message type - log warning
+              console.warn('[WebSocket] Unknown message type:', data.type)
             }
           } catch (err) {
             console.error('Error parsing WebSocket message:', err)
+            console.error('Raw event.data:', event.data)
             if (this.onError) {
               this.onError(err)
             }
@@ -259,6 +294,13 @@ export class ImageProcessingWebSocket {
           }, 
           status: 'pending'
         })
+        
+        // Store file reference in a separate map that won't be cleaned up
+        // This is accessible via this.fileReferenceMap from the hook
+        if (!this.fileReferenceMap) {
+          this.fileReferenceMap = new Map()
+        }
+        // We'll set this after we have the originalUrl from the hook
         
         // Read file and send
         const reader = new FileReader()

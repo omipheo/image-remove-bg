@@ -2,8 +2,7 @@
 import io
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from gpu_manager import get_session, NUM_GPUS
-from rembg import remove
+from gpu_manager import get_instance, NUM_GPUS
 import torch
 
 
@@ -193,23 +192,14 @@ def process_image_sync(image_data, bg_color, output_format, watermark_option, fi
     max_retries = 2  # Retry once after GPU reset
     for attempt in range(max_retries):
         try:
-            session = get_session(gpu_id=gpu_id)
-            # rembg remove() function processes image
-            # It can accept PIL Image or bytes
-            # When given PIL Image, it returns bytes (RGBA PNG)
-            # Sessions can be reused for multiple images (batch processing support)
-            result = remove(input_image, session=session)
+            withoutbg_instance = get_instance(gpu_id=gpu_id)
+            # withoutbg remove_background() accepts PIL Image and returns PIL Image
+            # Instances can be reused for multiple images and support batch processing
+            processed_image = withoutbg_instance.remove_background(input_image)
             
-            # rembg returns bytes when given PIL Image
-            if isinstance(result, bytes):
-                processed_image = Image.open(io.BytesIO(result))
-            elif isinstance(result, Image.Image):
-                processed_image = result
-            else:
-                # Convert to bytes if needed
-                img_bytes = io.BytesIO()
-                result.save(img_bytes, format='PNG')
-                processed_image = Image.open(io.BytesIO(img_bytes.getvalue()))
+            # withoutbg returns PIL.Image directly
+            if not isinstance(processed_image, Image.Image):
+                raise ValueError(f"Expected PIL.Image, got {type(processed_image)}")
             
             # Synchronize GPU operations to ensure completion before clearing cache
             if gpu_id is not None and NUM_GPUS > 0:
@@ -322,8 +312,8 @@ def process_image_sync(image_data, bg_color, output_format, watermark_option, fi
 
 def process_batch_sync(image_data_list, bg_color, output_format, watermark_option, filenames=None, gpu_id=None):
     """
-    Process multiple images in batch using rembg.
-    This is more efficient than processing images one by one as sessions can be reused.
+    Process multiple images in batch using withoutbg's batch processing.
+    This is more efficient than processing images one by one.
     
     Args:
         image_data_list: List of image data (bytes) to process
@@ -336,13 +326,13 @@ def process_batch_sync(image_data_list, bg_color, output_format, watermark_optio
     Returns:
         List of tuples: (processed_image_bytes, mime_type, processed_filename, output_format)
     """
-    from gpu_manager import get_session, reset_gpu
+    from gpu_manager import get_instance, reset_gpu
     
     if filenames is None:
         filenames = [f'processed_image_{i}' for i in range(len(image_data_list))]
     
-    # Get session once for the batch (sessions can be reused)
-    session = get_session(gpu_id=gpu_id)
+    # Get withoutbg instance once for the batch
+    withoutbg_instance = get_instance(gpu_id=gpu_id)
     
     # Set GPU device context
     if gpu_id is not None and NUM_GPUS > 0:
@@ -351,16 +341,20 @@ def process_batch_sync(image_data_list, bg_color, output_format, watermark_optio
     results = []
     
     try:
-        # Process all images in batch using the same session
-        for idx, (image_data, filename) in enumerate(zip(image_data_list, filenames)):
+        # Prepare input images for batch processing
+        input_images = []
+        for image_data in image_data_list:
+            input_image = Image.open(io.BytesIO(image_data))
+            input_image = optimize_image_size(input_image, max_dimension=1024)
+            input_images.append(input_image)
+        
+        # Process all images in batch using withoutbg's batch processing
+        print(f"Processing batch of {len(input_images)} images using withoutbg batch processing...")
+        processed_images = withoutbg_instance.remove_background_batch(input_images)
+        
+        # Process each result
+        for idx, (processed_image, filename) in enumerate(zip(processed_images, filenames)):
             try:
-                # Load image
-                input_image = Image.open(io.BytesIO(image_data))
-                input_image = optimize_image_size(input_image, max_dimension=1024)
-                
-                # Process with rembg (session is reused for all images in batch)
-                # rembg returns PIL Image when given PIL Image
-                processed_image = remove(input_image, session=session)
                 
                 # Ensure RGBA mode
                 if processed_image.mode != 'RGBA':

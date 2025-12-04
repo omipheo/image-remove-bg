@@ -34,7 +34,7 @@ PyMatting==1.1.14
 pyreadline3==3.5.4
 python-multipart==0.0.20
 referencing==0.37.0
-rembg[new]
+withoutbg
 requests==2.32.5
 rpds-py==0.29.0
 scikit-image==0.25.2

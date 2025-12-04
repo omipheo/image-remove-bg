@@ -39,7 +39,8 @@ const HomePage = () => {
     downloadAllProcessedImages,
     stopProcessing,
     setError,
-    progress
+    progress,
+    isDownloading
   } = useImageProcessing()
 
   const handleFilesSelected = (files) => {
@@ -68,6 +69,7 @@ const HomePage = () => {
         hasProcessedImages={!!(imageUrl || (processedImages && processedImages.length > 0))}
         onStop={stopProcessing}
         showDownload={downloadMode === 'manual'}
+        isDownloading={isDownloading}
       />
 
       <ProgressBar 
@@ -109,7 +111,7 @@ const HomePage = () => {
         processedImages={processedImages}
         onDownload={downloadProcessedImage}
         fileType={fileType}
-        isLoading={isLoading}
+        isLoading={isLoading || isDownloading}
         showDownload={downloadMode === 'manual'}
       />
     </div>

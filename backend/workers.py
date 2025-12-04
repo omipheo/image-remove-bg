@@ -8,14 +8,14 @@ from storage import store_image
 
 # Thread pool for CPU-bound operations - limit to prevent GPU memory exhaustion
 # Thread pool for CPU-bound operations
-# rembg sessions can be reused for batch processing, but we still limit workers for stability
+# withoutbg supports native batch processing, but we still limit workers for stability
 MAX_WORKERS = min(16, NUM_GPUS * 4) if NUM_GPUS > 0 else 4
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 print(f"Thread pool configured with {MAX_WORKERS} workers")
 
 # Semaphore to limit concurrent GPU operations per GPU
-# rembg sessions are more stable than transparent_background, but we still limit concurrency
-# This prevents GPU memory issues and ensures stable batch processing
+# withoutbg supports native batch processing and is more stable than transparent_background
+# We still limit concurrency to prevent GPU memory issues and ensure stable batch processing
 _gpu_semaphores = {}
 for gpu_id in range(NUM_GPUS):
     _gpu_semaphores[gpu_id] = asyncio.Semaphore(1)  # Only 1 concurrent operation per GPU (thread-safety)
@@ -100,6 +100,7 @@ async def gpu_worker(gpu_id: int):
                 # Send result immediately via callback
                 download_url = f"/api/download?imageId={image_id}"
                 result = {
+                    "type": "image_processed",  # Clear message type for frontend
                     "taskId": task_id,
                     "imageId": image_id,
                     "downloadUrl": download_url,
@@ -110,7 +111,17 @@ async def gpu_worker(gpu_id: int):
                 }
                 
                 if callback:
-                    await callback(result)
+                    try:
+                        await callback(result)
+                    except RuntimeError as e:
+                        # WebSocket closed - image is still stored, just can't send result
+                        if "close message has been sent" in str(e):
+                            print(f"Warning: WebSocket closed, cannot send result for task {task_id}, but image {image_id} is stored")
+                        else:
+                            raise
+                    except Exception as e:
+                        # Other callback errors - log but don't crash
+                        print(f"Error in callback for task {task_id}: {e}")
                 
             except Exception as e:
                 import traceback
@@ -127,6 +138,7 @@ async def gpu_worker(gpu_id: int):
                 
                 # Send error via callback
                 result = {
+                    "type": "image_processed",  # Clear message type for frontend
                     "taskId": task_id,
                     "filename": filename,
                     "success": False,
@@ -134,7 +146,17 @@ async def gpu_worker(gpu_id: int):
                 }
                 
                 if callback:
-                    await callback(result)
+                    try:
+                        await callback(result)
+                    except RuntimeError as e:
+                        # WebSocket closed - just log
+                        if "close message has been sent" in str(e):
+                            print(f"Warning: WebSocket closed, cannot send error result for task {task_id}")
+                        else:
+                            raise
+                    except Exception as e:
+                        # Other callback errors - log but don't crash
+                        print(f"Error in error callback for task {task_id}: {e}")
             
             finally:
                 # Mark task as done
@@ -150,15 +172,20 @@ async def batch_processor():
     """Processes batches sequentially - while one batch processes, next batch can be uploaded"""
     global _current_batch_processing
     
+    print("batch_processor started and waiting for batches...")
     while True:
         try:
             # Get next batch from queue (blocks until available)
+            print("batch_processor: Waiting for batch from queue...")
             batch_data = await _batch_queue.get()
+            print(f"batch_processor: Received batch data: {batch_data is not None}")
             
             if batch_data is None:  # Shutdown signal
+                print("batch_processor: Received shutdown signal")
                 break
             
             batch_id, batch_images, bg_color, output_format, watermark_option, callback = batch_data
+            print(f"batch_processor: Extracted batch_id={batch_id}, images={len(batch_images)}")
             
             async with _batch_processing_lock:
                 _current_batch_processing = batch_id

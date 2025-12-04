@@ -10,26 +10,39 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, 
         {isLoading && <span className="processing-indicator">Processing...</span>}
       </h2>
       <div className="images-grid">
-        {processedImages.map((item, index) => (
-          <div key={item.imageId || `${item.file.name}-${index}`} className="image-card">
-            <div className="image-card-header">
-              <h4 className="image-card-title">{item.file.name}</h4>
-              <span className="image-card-size">{(item.file.size / 1024).toFixed(2)} KB</span>
-            </div>
-            <div className="image-card-images">
-              <div className="image-card-item">
-                <p className="image-card-label">Original</p>
-                <div className="image-card-container">
-                  <img src={item.originalUrl} alt={`Original ${item.file.name}`} />
+        {processedImages.map((item, index) => {
+          // Handle case where file might be null
+          const fileName = item.file?.name || item.filename || `Image ${index + 1}`
+          const fileSize = item.file?.size ? `${(item.file.size / 1024).toFixed(2)} KB` : 'N/A'
+          
+          return (
+            <div key={item.imageId || `${fileName}-${index}`} className="image-card">
+              <div className="image-card-header">
+                <h4 className="image-card-title">{fileName}</h4>
+                <span className="image-card-size">{fileSize}</span>
+              </div>
+              <div className="image-card-images">
+                <div className="image-card-item">
+                  <p className="image-card-label">Original</p>
+                  <div className="image-card-container">
+                    {item.originalUrl ? (
+                      <img src={item.originalUrl} alt={`Original ${fileName}`} />
+                    ) : (
+                      <div className="image-placeholder">Original image not available</div>
+                    )}
+                  </div>
+                </div>
+                <div className="image-card-item">
+                  <p className="image-card-label">Processed</p>
+                  <div className="image-card-container">
+                    {item.processedUrl ? (
+                      <img src={item.processedUrl} alt={`Processed ${fileName}`} />
+                    ) : (
+                      <div className="image-placeholder">Processed image not available</div>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="image-card-item">
-                <p className="image-card-label">Processed</p>
-                <div className="image-card-container">
-                  <img src={item.processedUrl} alt={`Processed ${item.file.name}`} />
-                </div>
-              </div>
-            </div>
             {showDownload && (
               <button
                 className="image-card-download"
@@ -40,8 +53,9 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, 
                 Download
               </button>
             )}
-          </div>
-        ))}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
