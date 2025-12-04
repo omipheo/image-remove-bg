@@ -6,6 +6,7 @@ import OptionsSection from '../components/OptionsSection'
 import ImageComparison from '../components/ImageComparison'
 import MultipleImagesGrid from '../components/MultipleImagesGrid'
 import ErrorMessage from '../components/ErrorMessage'
+import ProgressBar from '../components/ProgressBar'
 import '../styles/pages/HomePage.css'
 
 const HomePage = () => {
@@ -37,7 +38,8 @@ const HomePage = () => {
     downloadProcessedImage,
     downloadAllProcessedImages,
     stopProcessing,
-    setError
+    setError,
+    progress
   } = useImageProcessing()
 
   const handleFilesSelected = (files) => {
@@ -66,6 +68,11 @@ const HomePage = () => {
         hasProcessedImages={!!(imageUrl || (processedImages && processedImages.length > 0))}
         onStop={stopProcessing}
         showDownload={downloadMode === 'manual'}
+      />
+
+      <ProgressBar 
+        progress={progress}
+        isLoading={isLoading}
       />
 
       <OptionsSection

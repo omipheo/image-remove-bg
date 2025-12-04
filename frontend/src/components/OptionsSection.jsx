@@ -38,9 +38,9 @@ const OptionsSection = ({ fileType, backgroundColor, downloadMethod, watermark, 
       const validValue = 1
       setConcurrencyInput(validValue.toString())
       onConcurrencyChange(validValue)
-    } else if (numValue > 100) {
-      // If too large, set to maximum (100)
-      const validValue = 100
+    } else if (numValue > 600) {
+      // If too large, set to maximum (600)
+      const validValue = 600
       setConcurrencyInput(validValue.toString())
       onConcurrencyChange(validValue)
     } else {
@@ -98,12 +98,12 @@ const OptionsSection = ({ fileType, backgroundColor, downloadMethod, watermark, 
           inputMode="numeric"
           className="option-input"
           min="1"
-          max="100"
+          max="600"
           value={concurrencyInput}
           onChange={handleConcurrencyChange}
           onBlur={handleConcurrencyBlur}
           disabled={isLoading}
-          title="Number of images to process simultaneously (1-100)"
+          title="Number of images to process simultaneously (1-600)"
         />
       </div>
 

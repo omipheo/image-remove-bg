@@ -197,9 +197,9 @@ async def upload_images_batch(request: Request):
         file_data_list = await asyncio.gather(*file_data_tasks)
         
         # Process all images in parallel using asyncio.gather with GPU load balancing
-        # CRITICAL: Process sequentially per GPU to prevent CUDA illegal memory access
-        # Remover instances are NOT thread-safe, so we must process one at a time per GPU
-        CHUNK_SIZE = 5  # Further reduced - process 5 images at a time to prevent corruption
+        # rembg sessions support batch processing and are more stable than transparent_background
+        # We still limit concurrency per GPU for stability
+        CHUNK_SIZE = 108  # Process 24 images per chunk (matches recommended frontend batch size)
         
         executor = get_executor()
         gpu_semaphores = get_gpu_semaphores()
@@ -504,16 +504,22 @@ async def websocket_process_images(websocket: WebSocket):
                                 # Send individual result
                                 await send_result(result)
                                 
+                                # Debug: Log progress
+                                print(f"Batch {batch_id} progress: {batch_tracker['completed']}/{batch_tracker['total']}")
+                                
                                 # If batch complete, send batch completion message
                                 if batch_tracker["completed"] >= batch_tracker["total"]:
+                                    successful = len([r for r in batch_tracker["results"] if r.get("success", False)])
+                                    failed = len([r for r in batch_tracker["results"] if not r.get("success", False)])
+                                    print(f"Batch {batch_id} complete: {successful} successful, {failed} failed. Sending batch_complete message...")
                                     await websocket.send_json({
                                         "type": "batch_complete",
                                         "batchId": batch_id,
                                         "total": batch_tracker["total"],
-                                        "successful": len([r for r in batch_tracker["results"] if r.get("success", False)]),
-                                        "failed": len([r for r in batch_tracker["results"] if not r.get("success", False)])
+                                        "successful": successful,
+                                        "failed": failed
                                     })
-                                    print(f"Batch {batch_id} processing complete")
+                                    print(f"Batch {batch_id} processing complete - batch_complete message sent")
                             
                             # Add batch to processing queue (will be processed sequentially)
                             await batch_queue.put((

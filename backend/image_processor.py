@@ -2,7 +2,8 @@
 import io
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from gpu_manager import get_remover, NUM_GPUS
+from gpu_manager import get_session, NUM_GPUS
+from rembg import remove
 import torch
 
 
@@ -192,10 +193,23 @@ def process_image_sync(image_data, bg_color, output_format, watermark_option, fi
     max_retries = 2  # Retry once after GPU reset
     for attempt in range(max_retries):
         try:
-            remover = get_remover(gpu_id=gpu_id)
-            # transparent-background expects PIL Image and returns PIL Image with RGBA
-            # CRITICAL: This must be called from within the semaphore context to ensure thread-safety
-            processed_image = remover.process(input_image, type='rgba')
+            session = get_session(gpu_id=gpu_id)
+            # rembg remove() function processes image
+            # It can accept PIL Image or bytes
+            # When given PIL Image, it returns bytes (RGBA PNG)
+            # Sessions can be reused for multiple images (batch processing support)
+            result = remove(input_image, session=session)
+            
+            # rembg returns bytes when given PIL Image
+            if isinstance(result, bytes):
+                processed_image = Image.open(io.BytesIO(result))
+            elif isinstance(result, Image.Image):
+                processed_image = result
+            else:
+                # Convert to bytes if needed
+                img_bytes = io.BytesIO()
+                result.save(img_bytes, format='PNG')
+                processed_image = Image.open(io.BytesIO(img_bytes.getvalue()))
             
             # Synchronize GPU operations to ensure completion before clearing cache
             if gpu_id is not None and NUM_GPUS > 0:
@@ -304,4 +318,137 @@ def process_image_sync(image_data, bg_color, output_format, watermark_option, fi
     processed_filename = filename.rsplit('.', 1)[0] + f"-no-bg.{file_extension}"
     
     return processed_image_bytes, mime_type, processed_filename, output_format
+
+
+def process_batch_sync(image_data_list, bg_color, output_format, watermark_option, filenames=None, gpu_id=None):
+    """
+    Process multiple images in batch using rembg.
+    This is more efficient than processing images one by one as sessions can be reused.
+    
+    Args:
+        image_data_list: List of image data (bytes) to process
+        bg_color: Background color ("transparent", "white", or "black")
+        output_format: Output format ("PNG" or "JPEG")
+        watermark_option: Watermark option ("none" or "blog")
+        filenames: Optional list of filenames (defaults to "processed_image_N")
+        gpu_id: GPU ID to use (None for round-robin)
+    
+    Returns:
+        List of tuples: (processed_image_bytes, mime_type, processed_filename, output_format)
+    """
+    from gpu_manager import get_session, reset_gpu
+    
+    if filenames is None:
+        filenames = [f'processed_image_{i}' for i in range(len(image_data_list))]
+    
+    # Get session once for the batch (sessions can be reused)
+    session = get_session(gpu_id=gpu_id)
+    
+    # Set GPU device context
+    if gpu_id is not None and NUM_GPUS > 0:
+        torch.cuda.set_device(gpu_id)
+    
+    results = []
+    
+    try:
+        # Process all images in batch using the same session
+        for idx, (image_data, filename) in enumerate(zip(image_data_list, filenames)):
+            try:
+                # Load image
+                input_image = Image.open(io.BytesIO(image_data))
+                input_image = optimize_image_size(input_image, max_dimension=1024)
+                
+                # Process with rembg (session is reused for all images in batch)
+                # rembg returns PIL Image when given PIL Image
+                processed_image = remove(input_image, session=session)
+                
+                # Ensure RGBA mode
+                if processed_image.mode != 'RGBA':
+                    processed_image = processed_image.convert('RGBA')
+                
+                # Apply background color
+                if bg_color == "transparent":
+                    if processed_image.mode == "RGBA":
+                        processed_image = add_checkerboard_background(processed_image)
+                    elif processed_image.mode != "RGB":
+                        processed_image = processed_image.convert("RGB")
+                else:
+                    if processed_image.mode == "RGBA":
+                        if bg_color == "white":
+                            bg_rgb = (255, 255, 255)
+                        else:  # black
+                            bg_rgb = (0, 0, 0)
+                        background = Image.new("RGB", processed_image.size, bg_rgb)
+                        background.paste(processed_image, mask=processed_image.split()[3])
+                        processed_image = background
+                    elif processed_image.mode != "RGB":
+                        processed_image = processed_image.convert("RGB")
+                
+                # Determine output format
+                output_format_final = "PNG" if output_format.upper() == "PNG" else "JPEG"
+                mime_type = "image/png" if output_format_final == "PNG" else "image/jpeg"
+                
+                # Convert to bytes
+                img_byte_arr = io.BytesIO()
+                
+                # JPEG doesn't support transparency
+                if output_format_final == "JPEG" and processed_image.mode == "RGBA":
+                    if bg_color == "transparent":
+                        rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
+                        rgb_image.paste(processed_image, mask=processed_image.split()[3])
+                        processed_image = rgb_image
+                    else:
+                        rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
+                        rgb_image.paste(processed_image, mask=processed_image.split()[3])
+                        processed_image = rgb_image
+                
+                # Add watermark if requested
+                if watermark_option == "blog":
+                    processed_image = add_pedals_watermark(processed_image)
+                
+                # Save
+                quality = 85 if output_format_final == "JPEG" else 95
+                processed_image.save(img_byte_arr, format=output_format_final, quality=quality, optimize=True)
+                img_byte_arr.seek(0)
+                processed_image_bytes = img_byte_arr.read()
+                
+                # Generate filename
+                file_extension = "png" if output_format_final == "PNG" else "jpg"
+                processed_filename = filename.rsplit('.', 1)[0] + f"-no-bg.{file_extension}"
+                
+                results.append((processed_image_bytes, mime_type, processed_filename, output_format_final))
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error processing image {idx + 1} ({filename}): {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
+                # Add None to results to maintain index alignment
+                results.append(None)
+        
+        # Clear GPU cache after batch
+        if gpu_id is not None and NUM_GPUS > 0:
+            try:
+                with torch.cuda.device(gpu_id):
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+            except:
+                pass
+        
+        return results
+        
+    except Exception as e:
+        # Clear GPU cache on error
+        if gpu_id is not None and NUM_GPUS > 0:
+            try:
+                with torch.cuda.device(gpu_id):
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+            except:
+                pass
+        import traceback
+        error_msg = f"Error during batch processing: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        raise Exception(error_msg)
 

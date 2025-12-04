@@ -12,6 +12,7 @@ export const useImageProcessing = () => {
   const [error, setError] = useState(null)
   const [imageId, setImageId] = useState(null)
   const [processedImages, setProcessedImages] = useState([])
+  const [progress, setProgress] = useState({ processed: 0, total: 0, percentage: 0, currentBatch: 0, totalBatches: 0 })
   const abortControllerRef = useRef(null)
   const isCancelledRef = useRef(false)
   const wsRef = useRef(null) // WebSocket reference for streaming
@@ -29,6 +30,7 @@ export const useImageProcessing = () => {
     setOriginalImageUrl(null)
     setError(null)
     setImageId(null)
+    setProgress({ processed: 0, total: 1, percentage: 0, currentBatch: 0, totalBatches: 0 })
 
     try {
       // Read and display original image first
@@ -70,6 +72,7 @@ export const useImageProcessing = () => {
         setImageUrl(finalImageUrl)
         setImageId(result.imageId)
         setIsLoading(false)
+        setProgress({ processed: 1, total: 1, percentage: 100, currentBatch: 1, totalBatches: 1 })
         
         // Auto-download if enabled
         if (downloadMode === 'automatic') {
@@ -164,12 +167,24 @@ export const useImageProcessing = () => {
             return
           }
           
+          // Track total images to process (first image + remaining images)
+          const totalImages = 1 + remainingImages.length // First image already processed
+          
           // Create WebSocket connection for streaming
           const ws = new ImageProcessingWebSocket(
             // onResult callback - called when each image is processed
             (result) => {
               if (result.success) {
                 console.log(`Image ${result.taskId} processed: ${result.filename}`)
+                // Update progress
+                setProgress(prev => {
+                  const newProcessed = prev.processed + 1
+                  return {
+                    ...prev,
+                    processed: newProcessed,
+                    percentage: Math.round((newProcessed / prev.total) * 100)
+                  }
+                })
               } else {
                 console.error(`Image ${result.taskId} failed: ${result.error}`)
               }
@@ -194,13 +209,22 @@ export const useImageProcessing = () => {
           console.log(`Starting batch-based pipeline processing of ${remainingImages.length} images (batch size: ${concurrency})...`)
           
           // Split images into batches based on concurrency setting
-          const batchSize = Math.max(1, Math.min(concurrency, 200)) // Clamp between 1 and 200
+          const batchSize = Math.max(1, Math.min(concurrency, 600)) // Clamp between 1 and 600
           const batches = []
           for (let i = 0; i < remainingImages.length; i += batchSize) {
             batches.push(remainingImages.slice(i, i + batchSize))
           }
           
           console.log(`Split into ${batches.length} batch(es) of ~${batchSize} images each`)
+          
+          // Initialize progress with total images and batch count
+          setProgress({ 
+            processed: 1, 
+            total: totalImages, 
+            percentage: Math.round((1 / totalImages) * 100), 
+            currentBatch: 0, 
+            totalBatches: batches.length 
+          })
           
           // Pipeline workflow: upload next batch when current batch starts processing
           // Batch 1: Upload → Start Processing
@@ -242,6 +266,7 @@ export const useImageProcessing = () => {
             const batchId = batchIndex
             
             console.log(`Uploading batch ${batchId} (${batch.length} images)...`)
+            setProgress(prev => ({ ...prev, currentBatch: batchId + 1 }))
             
             try {
               // Upload batch (this is fast - just sending data)
@@ -281,6 +306,13 @@ export const useImageProcessing = () => {
           }
           
           console.log(`Processing complete. ${allProcessedImagesForDownload.length} images ready for download.`)
+          
+          // Update final progress
+          setProgress(prev => ({
+            ...prev,
+            processed: prev.total,
+            percentage: 100
+          }))
           
           // Close WebSocket connection
           ws.close()
@@ -533,6 +565,7 @@ export const useImageProcessing = () => {
     error,
     imageId,
     processedImages,
+    progress,
     // Actions
     processImage,
     processMultipleImages,

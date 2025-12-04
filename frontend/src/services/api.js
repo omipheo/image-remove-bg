@@ -1,6 +1,60 @@
 import { API_CONFIG } from '../config/api'
 
 /**
+ * Upload single image to backend
+ */
+export const uploadImageToBackend = async (file, backgroundColor, fileType, signal) => {
+  const formData = new FormData()
+  formData.append('image', file)  // Backend expects 'image' field name
+  formData.append('backgroundColor', backgroundColor)
+  formData.append('fileType', fileType)
+
+  const response = await fetch(`${API_CONFIG.BASE_URL}/api/upload`, {
+    method: 'POST',
+    body: formData,
+    signal
+  })
+
+  if (!response.ok) {
+    throw new Error(`Upload failed: ${response.statusText}`)
+  }
+
+  const result = await response.json()
+  return {
+    imageId: result.imageId,
+    imageUrl: result.imageUrl || `${API_CONFIG.BASE_URL}${result.downloadUrl}`,
+    downloadUrl: result.downloadUrl
+  }
+}
+
+/**
+ * Download image from backend
+ */
+export const downloadImageFromBackend = async (imageIdOrUrl, fileType) => {
+  let url
+  if (imageIdOrUrl.startsWith('http') || imageIdOrUrl.startsWith('/')) {
+    url = imageIdOrUrl.startsWith('/') ? `${API_CONFIG.BASE_URL}${imageIdOrUrl}` : imageIdOrUrl
+  } else {
+    url = `${API_CONFIG.BASE_URL}/api/download?imageId=${imageIdOrUrl}`
+  }
+
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.statusText}`)
+  }
+  return await response.blob()
+}
+
+/**
+ * Upload batch of images to backend (legacy, now uses WebSocket)
+ */
+export const uploadImagesBatchToBackend = async (files, backgroundColor, fileType, watermark) => {
+  // This is a legacy function - batch processing now uses WebSocket
+  // Keeping for backward compatibility
+  throw new Error('Batch upload now uses WebSocket. Use ImageProcessingWebSocket instead.')
+}
+
+/**
  * WebSocket service for continuous streaming image processing
  */
 export class ImageProcessingWebSocket {
@@ -19,8 +73,18 @@ export class ImageProcessingWebSocket {
     return new Promise((resolve, reject) => {
       try {
         // Get WebSocket URL (convert http to ws, https to wss)
-        const baseUrl = API_CONFIG.BASE_URL || 'http://localhost:8000'
-        const wsUrl = baseUrl.replace(/^http/, 'ws') + '/ws/process-images'
+        // In production, use the current page's protocol and host
+        let baseUrl = API_CONFIG.BASE_URL
+        if (!baseUrl || baseUrl === '') {
+          // Production: use current page protocol and host
+          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+          const host = window.location.host
+          baseUrl = `${protocol}//${host}`
+        } else {
+          // Development: convert http/https to ws/wss
+          baseUrl = baseUrl.replace(/^http/, 'ws')
+        }
+        const wsUrl = baseUrl + '/ws/process-images'
         
         this.ws = new WebSocket(wsUrl)
         
@@ -142,6 +206,8 @@ export class ImageProcessingWebSocket {
       const batchResults = new Array(files.length).fill(null)
       let completed = 0
       let hasError = false
+      let filesSent = 0
+      const totalFiles = files.length
       const batchResolve = resolve
       const batchReject = reject
       
@@ -207,6 +273,21 @@ export class ImageProcessingWebSocket {
             
             // Send binary data
             this.ws.send(reader.result)
+            
+            // Track that this file has been sent
+            filesSent++
+            
+            // When all files are sent, send batch_end
+            if (filesSent >= totalFiles) {
+              setTimeout(() => {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                  this.ws.send(JSON.stringify({
+                    type: 'batch_end',
+                    batchId: batchId
+                  }))
+                }
+              }, 100) // Small delay to ensure all WebSocket messages are queued
+            }
           } catch (err) {
             this.pendingTasks.delete(taskId)
             if (!hasError) {
@@ -227,16 +308,17 @@ export class ImageProcessingWebSocket {
         reader.readAsArrayBuffer(file)
       })
       
-      // Send batch end (triggers processing) after all files are read
-      // Use a small delay to ensure all images are sent
+      // Fallback: Send batch_end after a longer delay if not all files sent
+      // This handles edge cases where FileReader might fail silently
       setTimeout(() => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN && filesSent < totalFiles) {
+          console.warn(`Batch ${batchId}: Only ${filesSent}/${totalFiles} files sent, sending batch_end anyway`)
           this.ws.send(JSON.stringify({
             type: 'batch_end',
             batchId: batchId
           }))
         }
-      }, 200) // Small delay to ensure all images are sent
+      }, Math.max(10000, totalFiles * 100)) // Dynamic delay: 100ms per file, minimum 10 seconds
     })
   }
 
@@ -297,135 +379,7 @@ export class ImageProcessingWebSocket {
       this.ws.send(JSON.stringify({ type: 'close' }))
       this.ws.close()
       this.ws = null
-      this.isConnected = false
-      this.pendingTasks.clear()
     }
+    this.isConnected = false
   }
 }
-
-/**
- * Upload image to backend for processing
- */
-export const uploadImageToBackend = async (file, bgColor, outputFormat, signal = null) => {
-  const formData = new FormData()
-  formData.append('image', file)
-  formData.append('backgroundColor', bgColor)
-  formData.append('fileType', outputFormat)
-  
-  try {
-    console.log('Uploading to:', API_CONFIG.UPLOAD_ENDPOINT)
-    const fetchOptions = {
-      method: 'POST',
-      body: formData
-    }
-    
-    if (signal) {
-      fetchOptions.signal = signal
-    }
-    
-    const response = await fetch(API_CONFIG.UPLOAD_ENDPOINT, fetchOptions)
-    
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Upload failed' }))
-      throw new Error(errorData.detail || `Upload failed with status ${response.status}`)
-    }
-    
-    const data = await response.json()
-    return {
-      imageUrl: data.imageUrl,
-      imageId: data.imageId
-    }
-  } catch (error) {
-    // Handle abort error
-    if (error.name === 'AbortError') {
-      throw error
-    }
-    // More detailed error message
-    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-      throw new Error(`Cannot connect to backend. Make sure the backend is running on ${API_CONFIG.BASE_URL || 'http://localhost:8000'}`)
-    }
-    throw new Error(`Upload failed: ${error.message}`)
-  }
-}
-
-/**
- * Upload multiple images to backend for batch processing
- */
-export const uploadImagesBatchToBackend = async (files, bgColor, outputFormat, signal = null) => {
-  const formData = new FormData()
-  
-  // Append all images with the same field name "images"
-  files.forEach(file => {
-    formData.append('images', file)
-  })
-  
-  formData.append('backgroundColor', bgColor)
-  formData.append('fileType', outputFormat)
-  
-  try {
-    console.log(`Uploading batch of ${files.length} images to:`, `${API_CONFIG.BASE_URL}/api/upload-batch`)
-    const fetchOptions = {
-      method: 'POST',
-      body: formData
-    }
-    
-    if (signal) {
-      fetchOptions.signal = signal
-    }
-    
-    const response = await fetch(`${API_CONFIG.BASE_URL}/api/upload-batch`, fetchOptions)
-    
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Batch upload failed' }))
-      throw new Error(errorData.detail || `Batch upload failed with status ${response.status}`)
-    }
-    
-    const data = await response.json()
-    return {
-      results: data.results,
-      total: data.total,
-      successful: data.successful,
-      failed: data.failed
-    }
-  } catch (error) {
-    // Handle abort error
-    if (error.name === 'AbortError') {
-      throw error
-    }
-    // More detailed error message
-    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-      throw new Error(`Cannot connect to backend. Make sure the backend is running on ${API_CONFIG.BASE_URL || 'http://localhost:8000'}`)
-    }
-    throw new Error(`Batch upload failed: ${error.message}`)
-  }
-}
-
-/**
- * Download processed image from backend
- * Supports both imageId and direct downloadUrl
- */
-export const downloadImageFromBackend = async (imageIdOrUrl, outputFormat = null) => {
-  try {
-    let url
-    if (imageIdOrUrl.startsWith('/api/download') || imageIdOrUrl.startsWith('http')) {
-      // It's already a download URL
-      url = imageIdOrUrl.startsWith('http') ? imageIdOrUrl : `${API_CONFIG.BASE_URL}${imageIdOrUrl}`
-    } else {
-      // It's an imageId, construct URL
-      url = `${API_CONFIG.DOWNLOAD_ENDPOINT}?imageId=${encodeURIComponent(imageIdOrUrl)}`
-      if (outputFormat) {
-        url += `&fileType=${encodeURIComponent(outputFormat)}`
-      }
-    }
-    
-    const response = await fetch(url)
-    if (!response.ok) {
-      throw new Error(`Download failed with status ${response.status}`)
-    }
-    const blob = await response.blob()
-    return blob
-  } catch (error) {
-    throw new Error(`Download failed: ${error.message}`)
-  }
-}
-

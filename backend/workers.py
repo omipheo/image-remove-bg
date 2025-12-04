@@ -3,19 +3,19 @@ import asyncio
 import torch
 from concurrent.futures import ThreadPoolExecutor
 from gpu_manager import NUM_GPUS
-from image_processor import process_image_sync
+from image_processor import process_image_sync, process_batch_sync
 from storage import store_image
 
 # Thread pool for CPU-bound operations - limit to prevent GPU memory exhaustion
-# CRITICAL: With Remover instances not being thread-safe, we need fewer workers
-# Each GPU can only handle 1 operation at a time safely
+# Thread pool for CPU-bound operations
+# rembg sessions can be reused for batch processing, but we still limit workers for stability
 MAX_WORKERS = min(16, NUM_GPUS * 4) if NUM_GPUS > 0 else 4
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-print(f"Thread pool configured with {MAX_WORKERS} workers to prevent GPU memory exhaustion")
+print(f"Thread pool configured with {MAX_WORKERS} workers")
 
-# Semaphore to limit concurrent GPU operations per GPU (prevent memory exhaustion and corruption)
-# CRITICAL: Remover instances are NOT thread-safe - only 1 operation per GPU at a time
-# This prevents CUDA illegal memory access errors
+# Semaphore to limit concurrent GPU operations per GPU
+# rembg sessions are more stable than transparent_background, but we still limit concurrency
+# This prevents GPU memory issues and ensures stable batch processing
 _gpu_semaphores = {}
 for gpu_id in range(NUM_GPUS):
     _gpu_semaphores[gpu_id] = asyncio.Semaphore(1)  # Only 1 concurrent operation per GPU (thread-safety)
