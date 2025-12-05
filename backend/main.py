@@ -54,6 +54,5 @@ if __name__ == "__main__":
         workers=workers,
         timeout_keep_alive=600,  # Increase timeout for batch processing
         limit_concurrency=200,    # Increase concurrent request limit
-        limit_max_requests=1000,  # Increase total request limit
         backlog=2048             # Increase connection backlog
     )

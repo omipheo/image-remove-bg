@@ -137,7 +137,14 @@ export class ImageProcessingWebSocket {
                 task.status = 'queued'
               }
             } else if (data.type === 'batch_started' || data.type === 'batch_queued') {
-              // Batch started/queued - no action needed
+              // Forward batch events so pipeline can track queue/start
+              if (this.onResult) {
+                try {
+                  this.onResult(data)
+                } catch (err) {
+                  console.error('Error in onResult callback for batch_started/batch_queued:', err)
+                }
+              }
             } else if (data.type === 'batch_complete') {
               // Batch processing complete (all individual results already received)
               // Send batch_complete to onResult callback for auto-download trigger

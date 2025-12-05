@@ -340,6 +340,11 @@ export const useImageProcessing = () => {
                   console.error(`Error processing image ${result.taskId}:`, err)
                   console.error('Error details:', err.stack)
                 }
+              } else if (result && result.type === 'batch_complete') {
+                // Handle batch_complete messages (they don't have success or image_processed type)
+                console.log(`[onResult] Batch ${result.batchId} complete: ${result.successful}/${result.total} successful, ${result.failed} failed`)
+                // Don't skip batch_complete - it's important for tracking
+                // The batch_complete handler above already processed it for auto-download
               } else {
                 console.log('Result does not match condition - skipping:', result)
               }
@@ -389,6 +394,9 @@ export const useImageProcessing = () => {
           // Track when batches start processing
           const batchProcessingStarted = new Set()
           
+          // Track when batches are queued (backend received batch_end)
+          const batchQueued = new Set()
+          
           // Enhanced result callback to track batch processing start
           const originalOnResult = ws.onResult
           
@@ -403,7 +411,16 @@ export const useImageProcessing = () => {
                 if (task && task.batchId !== undefined) {
                   if (!batchProcessingStarted.has(task.batchId)) {
                     batchProcessingStarted.add(task.batchId)
+                    console.log(`[Pipeline] Batch ${task.batchId} started processing (first result received)`)
                   }
+                }
+              }
+              // Also track batch_queued messages
+              if (result.type === 'batch_queued') {
+                const batchId = result.batchId
+                if (batchId !== undefined && !batchQueued.has(batchId)) {
+                  batchQueued.add(batchId)
+                  console.log(`[Pipeline] Batch ${batchId} queued for processing`)
                 }
               }
             }
@@ -415,6 +432,9 @@ export const useImageProcessing = () => {
           }
           
           // Process batches in pipeline
+          // Track all batch promises to wait for completion at the end
+          const batchPromises = []
+          
           for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             if (isCancelledRef.current) {
               break
@@ -464,38 +484,76 @@ export const useImageProcessing = () => {
             
             try {
               // Upload batch (this is fast - just sending data)
+              // Don't await the promise - let it resolve in background
+              // This allows us to start uploading the next batch immediately
               const uploadPromise = ws.sendBatch(batch, batchId)
               
-              // If this is not the first batch, wait for previous batch to START processing
-              // (not finish, just start - pipeline effect)
-              if (batchIndex > 0) {
+              // Track this promise to wait for completion at the end
+              batchPromises.push(uploadPromise)
+              
+              if (batchIndex === 0) {
+                // First batch: upload immediately, GPU will start processing right away
+                console.log(`[Pipeline] Batch 0 uploading...`)
+              } else {
+                // Subsequent batches: wait for previous batch to be QUEUED (not necessarily started processing)
+                // This ensures backend has received the batch before we send the next one
+                // GPU will process continuously - no delays in GPU processing
                 const prevBatchId = batchIndex - 1
-                // Wait a bit for previous batch to start processing
-                // The backend will queue this batch and process it after previous batch completes
-                await new Promise(resolve => setTimeout(resolve, 100))
+                console.log(`[Pipeline] Waiting for batch ${prevBatchId} to be queued before uploading batch ${batchId}...`)
+                
+                // Wait for previous batch to be queued (backend received batch_end)
+                // This is faster than waiting for processing to start
+                let waitCount = 0
+                const maxWait = 100 // Maximum 10 seconds (100 * 100ms)
+                while (!batchQueued.has(prevBatchId) && waitCount < maxWait && !isCancelledRef.current) {
+                  await new Promise(resolve => setTimeout(resolve, 100))
+                  waitCount++
+                }
+                
+                if (isCancelledRef.current) {
+                  console.log(`[Pipeline] Processing cancelled, stopping batch ${batchId} upload`)
+                  break
+                } else if (batchQueued.has(prevBatchId)) {
+                  console.log(`[Pipeline] Batch ${prevBatchId} queued, uploading batch ${batchId} (GPU processing continuously)`)
+                } else {
+                  console.warn(`[Pipeline] Batch ${prevBatchId} not queued after ${waitCount * 100}ms, uploading batch ${batchId} anyway`)
+                  // Continue - backend will queue it properly
+                }
               }
               
-              // Wait for batch to complete processing
-              // Note: Individual images are already displayed via onResult callback above
-              // This just waits for the batch promise to resolve for tracking
-              const batchResults = await uploadPromise
-              
+              // Don't wait for batch to complete processing before starting next batch upload
+              // The backend processes batches sequentially, but we can upload next batch while previous is processing
               // Results are already added to allProcessedImagesForDownload via onResult callback
-              // This is just for logging and tracking
               
             } catch (err) {
-              console.error(`Error processing batch ${batchId}:`, err)
+              console.error(`Error uploading batch ${batchId}:`, err)
               // Continue with next batch
             }
           }
           
+          // Wait for all batches to complete processing
+          // This ensures we don't close the connection before all processing is done
+          console.log(`[Processing] Waiting for ${batchPromises.length} batches to complete processing...`)
+          try {
+            await Promise.all(batchPromises)
+            console.log('[Processing] All batches completed processing')
+          } catch (err) {
+            console.error('[Processing] Some batches had errors:', err)
+            // Continue anyway - individual results are already handled via onResult callback
+          }
           
-          // Update final progress
+          // Don't add artificial delays - GPU should process continuously
+          // The backend will send all results via WebSocket
+          
+          // Update final progress based on actual processed count
+          const finalProcessed = allProcessedImagesForDownload.length
           setProgress(prev => ({
             ...prev,
-            processed: prev.total,
-            percentage: 100
+            processed: finalProcessed,
+            percentage: Math.min(100, Math.round((finalProcessed / prev.total) * 100))
           }))
+          
+          console.log(`[Processing Complete] Final count: ${finalProcessed}/${totalImages} images processed`)
           
           // If automatic download mode and we have a ZIP URL, trigger download after all processing is complete
           // For large batches, wait a bit longer to ensure all images are added to ZIP
@@ -560,7 +618,12 @@ export const useImageProcessing = () => {
             console.warn(`[Processing Complete] Auto-download mode enabled but no ZIP URL available`)
           }
           
+          // Wait briefly to ensure all final messages are sent (minimal delay)
+          console.log('[Processing Complete] Ensuring all messages are sent...')
+          await new Promise(resolve => setTimeout(resolve, 500))
+          
           // Close WebSocket connection
+          console.log('[Processing Complete] Closing WebSocket connection')
           ws.close()
           wsRef.current = null
           
