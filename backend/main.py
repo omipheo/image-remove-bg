@@ -1,28 +1,51 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request, WebSocket
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import io
-from transparent_background import Remover
 import uvicorn
 import os
 from dotenv import load_dotenv
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
+import base64
+
+# GPU-based processing imports
+from image_processor import process_image_sync
+from workers import get_batch_queue, start_batch_processor
+from gpu_manager import NUM_GPUS
+from websocket_routes import websocket_process_images
 
 # Load environment variables from .env file
 load_dotenv()
 
-app = FastAPI(title="Image Background Removal API")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown"""
+    # Startup
+    start_batch_processor()
+    print(f"Backend started with {NUM_GPUS} GPU(s) available")
+    yield
+    # Shutdown (if needed)
+    pass
+
+app = FastAPI(title="Image Background Removal API", lifespan=lifespan)
 
 # Get CORS origins from environment variable or use defaults
-cors_origins = os.getenv(
+cors_origins_str = os.getenv(
     "CORS_ORIGINS",
     "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
-).split(",")
+)
+# Split by comma and strip whitespace
+cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
+# Log CORS origins for debugging
+print(f"CORS Origins configured: {cors_origins}")
 
 # Configure CORS to allow frontend requests
 app.add_middleware(
@@ -36,131 +59,14 @@ app.add_middleware(
 # Store processed images temporarily (in production, use a proper storage solution)
 processed_images = {}
 
-# Initialize transparent-background remover (lazy load on first use)
-_remover = None
-
-# Thread pool for CPU-bound operations
-_executor = ThreadPoolExecutor(max_workers=4)
-
-def get_remover():
-    """Lazy load the remover to avoid loading model on startup"""
-    global _remover
-    if _remover is None:
-        try:
-            print("Initializing transparent_background Remover...")
-            _remover = Remover()
-            print("Remover initialized successfully")
-        except Exception as e:
-            print(f"Error initializing Remover: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
-    return _remover
-
-def optimize_image_size(image, max_dimension=2048):
-    """Resize image if it's too large to speed up processing"""
-    width, height = image.size
-    if width <= max_dimension and height <= max_dimension:
-        return image
-    
-    # Calculate new dimensions maintaining aspect ratio
-    if width > height:
-        new_width = max_dimension
-        new_height = int(height * (max_dimension / width))
-    else:
-        new_height = max_dimension
-        new_width = int(width * (max_dimension / height))
-    
-    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-
-def _process_image_sync(image_data, bg_color, output_format, watermark_option, filename='processed_image'):
-    """Synchronous image processing function for thread pool execution"""
-    # Load image as PIL Image
-    input_image = Image.open(io.BytesIO(image_data))
-    
-    # Optimize image size for faster processing
-    input_image = optimize_image_size(input_image, max_dimension=2048)
-    
-    try:
-        remover = get_remover()
-        # transparent-background expects PIL Image and returns PIL Image with RGBA
-        processed_image = remover.process(input_image, type='rgba')
-    except Exception as e:
-        import traceback
-        error_msg = f"Error during background removal: {str(e)}"
-        print(error_msg)
-        print(traceback.format_exc())
-        raise Exception(error_msg)
-    
-    # Ensure the result is in RGBA mode
-    if processed_image.mode != 'RGBA':
-        processed_image = processed_image.convert('RGBA')
-    
-    # Apply background color
-    if bg_color == "transparent":
-        # Create checkerboard pattern for transparent background
-        if processed_image.mode == "RGBA":
-            # Create checkerboard pattern
-            processed_image = add_checkerboard_background(processed_image)
-        elif processed_image.mode != "RGB":
-            processed_image = processed_image.convert("RGB")
-    else:
-        # Convert to RGB with specified background color
-        if processed_image.mode == "RGBA":
-            if bg_color == "white":
-                bg_rgb = (255, 255, 255)
-            else:  # black
-                bg_rgb = (0, 0, 0)
-            
-            background = Image.new("RGB", processed_image.size, bg_rgb)
-            background.paste(processed_image, mask=processed_image.split()[3])  # Use alpha channel as mask
-            processed_image = background
-        elif processed_image.mode != "RGB":
-            processed_image = processed_image.convert("RGB")
-    
-    # Determine output format
-    output_format = "PNG" if output_format.upper() == "PNG" else "JPEG"
-    mime_type = "image/png" if output_format == "PNG" else "image/jpeg"
-    
-    # Convert processed image to bytes
-    img_byte_arr = io.BytesIO()
-    
-    # JPEG doesn't support transparency, so convert to RGB if needed
-    if output_format == "JPEG" and processed_image.mode == "RGBA":
-        # If transparent was requested but JPEG format, use white background
-        if bg_color == "transparent":
-            # For JPEG, we must use a solid background (white)
-            rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
-            rgb_image.paste(processed_image, mask=processed_image.split()[3])
-            processed_image = rgb_image
-        else:
-            # Use white background for JPEG
-            rgb_image = Image.new("RGB", processed_image.size, (255, 255, 255))
-            rgb_image.paste(processed_image, mask=processed_image.split()[3])
-            processed_image = rgb_image
-    
-    # Add watermark if requested
-    if watermark_option == "blog":
-        processed_image = add_pedals_watermark(processed_image)
-    
-    # Use lower quality for JPEG to reduce size and processing time
-    quality = 85 if output_format == "JPEG" else 95
-    processed_image.save(img_byte_arr, format=output_format, quality=quality, optimize=True)
-    img_byte_arr.seek(0)
-    processed_image_bytes = img_byte_arr.read()
-    
-    # Generate filename
-    file_extension = "png" if output_format == "PNG" else "jpg"
-    processed_filename = filename.rsplit('.', 1)[0] + f"-no-bg.{file_extension}"
-    
-    return processed_image_bytes, mime_type, processed_filename, output_format
+# Thread pool for GPU-bound operations (runs in executor)
+_executor = ThreadPoolExecutor(max_workers=min(32, NUM_GPUS * 8) if NUM_GPUS > 0 else 4)
 
 async def process_single_image(file, bg_color, output_format, watermark_option):
     """
     Process a single image: remove background, apply color, and watermark.
     Returns processed image bytes, mime_type, and filename.
-    Uses thread pool for CPU-bound operations.
+    Uses GPU via thread pool executor.
     """
     # Read image file
     if hasattr(file, 'read'):
@@ -172,24 +78,29 @@ async def process_single_image(file, bg_color, output_format, watermark_option):
         image_data = file
         filename = 'processed_image'
     
-    # Run CPU-bound processing in thread pool
+    # Run GPU processing in thread pool (process_image_sync handles GPU)
     loop = asyncio.get_event_loop()
     processed_image_bytes, mime_type, processed_filename, output_format_final = await loop.run_in_executor(
         _executor,
-        _process_image_sync,
+        process_image_sync,
         image_data,
         bg_color,
         output_format,
         watermark_option,
-        filename
+        filename,
+        None  # gpu_id=None for round-robin
     )
     
     return processed_image_bytes, mime_type, processed_filename, output_format_final
 
-
 @app.get("/")
 async def root():
     return {"message": "Image Background Removal API", "status": "running"}
+
+@app.websocket("/ws/process-images")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for pipelined batch processing with streaming results"""
+    await websocket_process_images(websocket)
 
 
 @app.post("/api/upload")
@@ -244,13 +155,12 @@ async def upload_image(request: Request):
         if watermark_option not in ["none", "blog"]:
             raise HTTPException(status_code=400, detail="watermark must be 'none' or 'blog'")
         
-        # Process the image using helper function
+        # Process the image using GPU
         processed_image_bytes, mime_type, processed_filename, output_format = await process_single_image(
             file, bg_color, output_format, watermark_option
         )
         
         # Convert to base64 for frontend
-        import base64
         print("Encoding to base64...")
         image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
         print(f"Base64 encoded size: {len(image_base64)} characters")
@@ -294,16 +204,16 @@ async def upload_images_batch(request: Request):
     - fileType: "PNG" or "JPEG"
     """
     try:
-        print("DEBUG: Batch upload endpoint called")
+        print(f"[BATCH] Batch upload endpoint called at {time.time()}")
         # Parse form data
         form_data = await request.form()
         
-        print(f"DEBUG: form_data keys: {list(form_data.keys())}")
+        print(f"[BATCH] form_data keys: {list(form_data.keys())}")
         
         # Get files from form data (multiple files with same field name)
         # In Starlette/FastAPI, getlist() returns a list of values for the key
         files = form_data.getlist("images")
-        print(f"DEBUG: Found {len(files) if files else 0} files")
+        print(f"[BATCH] Found {len(files) if files else 0} files")
         
         if not files or len(files) == 0:
             print("DEBUG: No files found in form_data")
@@ -337,7 +247,20 @@ async def upload_images_batch(request: Request):
             if not hasattr(file, 'content_type') or not file.content_type or not file.content_type.startswith("image/"):
                 raise HTTPException(status_code=400, detail="All files must be images")
         
-        print(f"Processing batch of {len(files)} images in parallel")
+        print(f"[BATCH] Processing batch of {len(files)} images")
+        
+        # Check available disk space before processing large batches
+        if len(files) > 50:
+            import shutil
+            disk_usage = shutil.disk_usage('/')
+            free_gb = disk_usage.free / (1024**3)
+            print(f"[BATCH] Available disk space: {free_gb:.2f} GB")
+            if free_gb < 2.0:
+                raise HTTPException(
+                    status_code=507, 
+                    detail=f"Insufficient disk space ({free_gb:.2f} GB free). Need at least 2 GB for batch processing."
+                )
+        
         start_time = time.time()
         
         # Read all files first (I/O bound, can be parallelized)
@@ -353,52 +276,69 @@ async def upload_images_batch(request: Request):
         # Read all files in parallel
         file_data_tasks = [read_file_data(file, idx) for idx, file in enumerate(files)]
         file_data_list = await asyncio.gather(*file_data_tasks)
+        print(f"Read {len(file_data_list)} files, starting GPU processing...")
         
-        # Process all images in parallel using asyncio.gather
+        # Process images with limited concurrency to avoid overwhelming GPU memory
+        # Limit concurrent processing to prevent timeout and memory issues
+        max_concurrent = min(10, NUM_GPUS * 2) if NUM_GPUS > 0 else 4
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
         async def process_with_index(image_data, filename, original_file, idx):
-            try:
-                # Process the image directly using the sync function in thread pool
-                loop = asyncio.get_event_loop()
-                processed_image_bytes, mime_type, processed_filename, output_format_final = await loop.run_in_executor(
-                    _executor,
-                    _process_image_sync,
-                    image_data,
-                    bg_color,
-                    output_format,
-                    watermark_option,
-                    filename
-                )
-                
-                # Convert to base64 (can be optimized further)
-                import base64
-                image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
-                image_url = f"data:{mime_type};base64,{image_base64}"
-                
-                # Store the processed image
-                image_id = f"img_{len(processed_images) + idx}"
-                processed_images[image_id] = {
-                    "data": processed_image_bytes,
-                    "filename": processed_filename,
-                    "format": output_format_final,
-                    "mime_type": mime_type
-                }
-                
-                return {
-                    "imageUrl": image_url,
-                    "imageId": image_id,
-                    "filename": filename
-                }
-            except Exception as e:
-                import traceback
-                error_msg = f"Error processing image {idx + 1} ({filename}): {str(e)}"
-                print(error_msg)
-                print(traceback.format_exc())
-                return {
-                    "error": error_msg,
-                    "filename": filename
-                }
+            async with semaphore:  # Limit concurrent processing
+                try:
+                    # Process the image using GPU via thread pool
+                    loop = asyncio.get_event_loop()
+                    processed_image_bytes, mime_type, processed_filename, output_format_final = await loop.run_in_executor(
+                        _executor,
+                        process_image_sync,
+                        image_data,
+                        bg_color,
+                        output_format,
+                        watermark_option,
+                        filename,
+                        None  # gpu_id=None for round-robin
+                    )
+                    
+                    # Store the processed image
+                    image_id = f"img_{len(processed_images) + idx}_{int(time.time() * 1000)}"
+                    processed_images[image_id] = {
+                        "data": processed_image_bytes,
+                        "filename": processed_filename,
+                        "format": output_format_final,
+                        "mime_type": mime_type
+                    }
+                    
+                    # For large batches (>20), return download URL to reduce response size
+                    # For smaller batches, include base64 for immediate display
+                    result = {
+                        "imageId": image_id,
+                        "downloadUrl": f"/api/download?imageId={image_id}",
+                        "filename": processed_filename,
+                        "format": output_format_final
+                    }
+                    
+                    # Include base64 only for smaller batches to avoid timeout
+                    if len(files) <= 20:
+                        image_base64 = base64.b64encode(processed_image_bytes).decode("utf-8")
+                        result["imageUrl"] = f"data:{mime_type};base64,{image_base64}"
+                    
+                    if (idx + 1) % 10 == 0:
+                        print(f"[BATCH] Processed {idx + 1}/{len(file_data_list)} images...")
+                    
+                    return result
+                except Exception as e:
+                    import traceback
+                    error_msg = f"Error processing image {idx + 1} ({filename}): {str(e)}"
+                    print(f"ERROR in batch processing: {error_msg}")
+                    print("Full traceback:")
+                    traceback.print_exc()
+                    return {
+                        "error": error_msg,
+                        "filename": filename,
+                        "success": False
+                    }
         
-        # Process all images in parallel
+        # Process all images with limited concurrency
         processing_tasks = [
             process_with_index(image_data, filename, original_file, idx)
             for idx, (image_data, filename, original_file) in enumerate(file_data_list)
@@ -408,7 +348,7 @@ async def upload_images_batch(request: Request):
         elapsed_time = time.time() - start_time
         successful = len([r for r in results if 'error' not in r])
         failed = len([r for r in results if 'error' in r])
-        print(f"Batch processing completed in {elapsed_time:.2f}s: {successful} successful, {failed} failed ({len(files)/elapsed_time:.2f} images/sec)")
+        print(f"[BATCH] Batch processing completed in {elapsed_time:.2f}s: {successful} successful, {failed} failed ({len(files)/elapsed_time:.2f} images/sec)")
         
         return {
             "results": results,
@@ -427,7 +367,8 @@ async def upload_images_batch(request: Request):
         raise HTTPException(status_code=500, detail=f"Error processing batch: {str(e)}")
 
 
-def add_pedals_watermark(image):
+# Watermark and checkerboard functions are in image_processor.py
+# They are used by process_image_sync, so no need to import them here
     """
     Add PEDALS to METAL.com watermark to the bottom right corner of the image.
     Includes three outlined circles (like pedal knobs) and "PEDALS to METAL.com" text.

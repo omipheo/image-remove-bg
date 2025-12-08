@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import JSZip from 'jszip'
-import { uploadImageToBackend, uploadImagesBatchToBackend, downloadImageFromBackend } from '../services/api'
+import { uploadImageToBackend, downloadImageFromBackend } from '../services/api'
+import { ImageProcessingWebSocket } from '../services/websocketService'
 import { readImageAsDataURL, downloadFile, generateDownloadFilename, dataURLToBlob, addWatermark } from '../utils/fileUtils'
 import { API_CONFIG } from '../config/api'
 
@@ -97,7 +98,9 @@ export const useImageProcessing = () => {
     }
   }
 
-  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual', concurrency = 3) => {
+  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual') => {
+    // Batch size is fixed at 100 images per batch
+    const BATCH_SIZE = 100
     const imageFiles = files.filter(file => file.type.startsWith('image/'))
     if (imageFiles.length === 0) {
       setError('Please select at least one image file')
@@ -134,9 +137,9 @@ export const useImageProcessing = () => {
       const remainingImages = imageFiles.slice(1)
       
       if (API_CONFIG.USE_BACKEND) {
-        // Use batch upload for all remaining images
+        // Use WebSocket for pipelined processing
         try {
-          // Read original URLs for all remaining images first
+          // Read original URLs for all images
           const originalUrlsMap = new Map()
           await Promise.all(remainingImages.map(async (file) => {
             const originalUrl = await readImageAsDataURL(file)
@@ -148,64 +151,181 @@ export const useImageProcessing = () => {
             return
           }
           
-          // Process remaining images in batches based on concurrency setting
-          const batchSize = Math.max(1, Math.min(concurrency, 100)) // Clamp between 1 and 100
+          // Create WebSocket connection
+          const ws = new ImageProcessingWebSocket(
+            // onResult - called for each processed image (streaming)
+            async (result) => {
+              if (result.type === 'image_processed' && result.success) {
+                try {
+                  // Download image from backend
+                  const fullUrl = result.downloadUrl.startsWith('http') 
+                    ? result.downloadUrl 
+                    : `${API_CONFIG.BASE_URL}${result.downloadUrl}`
+                  const response = await fetch(fullUrl)
+                  if (!response.ok) throw new Error(`Download failed: ${response.statusText}`)
+                  
+                  const imageBlob = await response.blob()
+                  const processedUrl = URL.createObjectURL(imageBlob)
+                  
+                  // Find corresponding file using WebSocket service mapping
+                  const file = ws.getFileForResult(result)
+                  
+                  if (file) {
+                    const originalUrl = originalUrlsMap.get(file)
+                    let finalUrl = processedUrl
+                    
+                    // Apply watermark if needed
+                    if (watermark === 'blog') {
+                      finalUrl = await addWatermark(processedUrl, backgroundColor)
+                    }
+                    
+                    const processedImage = {
+                      file,
+                      originalUrl,
+                      processedUrl: finalUrl,
+                      imageId: result.imageId
+                    }
+                    
+                    allProcessedImagesForDownload.push(processedImage)
+                    setProcessedImages(prev => [...prev, processedImage])
+                  }
+                } catch (err) {
+                  console.error(`Error processing result for image ${result.taskId}:`, err)
+                }
+              } else if (result.type === 'batch_complete') {
+                console.log(`[WS] Batch ${result.batchId} complete`)
+              } else if (result.type === 'batch_queued') {
+                console.log(`[WS] Batch ${result.batchId} queued - GPU processing started`)
+              }
+            },
+            // onError
+            (error) => {
+              console.error('[WS] Error:', error)
+              setError(error.message || 'WebSocket error')
+              setIsLoading(false)
+            },
+            // onClose
+            () => {
+              console.log('[WS] Closed')
+              setIsLoading(false)
+            }
+          )
           
-          for (let i = 0; i < remainingImages.length; i += batchSize) {
-            if (isCancelledRef.current) {
-              break
-            }
+          // Connect WebSocket
+          await ws.connect(backgroundColor, fileType, watermark, BATCH_SIZE)
+          
+          // Split into batches of 100
+          const batches = []
+          for (let i = 0; i < remainingImages.length; i += BATCH_SIZE) {
+            batches.push(remainingImages.slice(i, i + BATCH_SIZE))
+          }
+          
+          // Pipeline workflow: Upload batch 0 → Process batch 0 (while uploading batch 1) → etc.
+          for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            if (isCancelledRef.current) break
             
-            const batch = remainingImages.slice(i, i + batchSize)
+            const batch = batches[batchIndex]
+            const batchId = batchIndex
             
-            // Upload batch to backend
-            const batchResult = await uploadImagesBatchToBackend(
-              batch,
-              backgroundColor,
-              fileType,
-              abortControllerRef.current.signal
-            )
-            
-            if (isCancelledRef.current) {
-              break
-            }
-            
-            // Process results and apply watermarks
-            for (let j = 0; j < batchResult.results.length; j++) {
-              const result = batchResult.results[j]
-              const file = batch[j]
+            if (batchIndex === 0) {
+              // First batch: upload immediately
+              console.log(`[WS] Uploading batch ${batchId} (${batch.length} images)`)
+              await ws.sendBatch(batch, batchId)
               
-              if (result.error) {
-                console.error(`Error processing ${file.name}:`, result.error)
-                continue
+              // Wait for batch_queued (GPU started processing) - this signals we can upload next batch
+              let waitCount = 0
+              while (!ws.batchQueued.has(batchId) && waitCount < 200) {
+                await new Promise(resolve => setTimeout(resolve, 50))
+                waitCount++
               }
               
-              const originalUrl = originalUrlsMap.get(file)
-              
-              // Apply watermark if needed
-              let processedUrl = result.imageUrl
-              if (watermark === 'blog') {
-                processedUrl = await addWatermark(result.imageUrl, backgroundColor)
+              if (ws.batchQueued.has(batchId)) {
+                console.log(`[WS] Batch ${batchId} queued - GPU processing started, can upload next batch`)
+              } else {
+                console.warn(`[WS] Batch ${batchId} upload complete but batch_queued not received (timeout)`)
+              }
+            } else {
+              // For subsequent batches: wait for previous batch to be queued (processing started)
+              // This ensures we upload next batch while previous is processing (pipelining)
+              const prevBatchId = batchIndex - 1
+              console.log(`[WS] Waiting for batch ${prevBatchId} to be queued before uploading batch ${batchId}...`)
+              let waitCount = 0
+              while (!ws.batchQueued.has(prevBatchId) && waitCount < 200) {
+                await new Promise(resolve => setTimeout(resolve, 50))
+                waitCount++
+                if (waitCount % 20 === 0) {
+                  console.log(`[WS] Still waiting for batch ${prevBatchId} to be queued... (${waitCount * 50}ms)`)
+                }
               }
               
-              const processedImage = {
-                file,
-                originalUrl,
-                processedUrl: processedUrl,
-                imageId: result.imageId
+              if (ws.batchQueued.has(prevBatchId)) {
+                // Now upload this batch (previous batch is already processing)
+                console.log(`[WS] Batch ${prevBatchId} is processing, uploading batch ${batchId} (${batch.length} images)`)
+                await ws.sendBatch(batch, batchId)
+                
+                // Wait for this batch to be queued (processing started)
+                waitCount = 0
+                while (!ws.batchQueued.has(batchId) && waitCount < 200) {
+                  await new Promise(resolve => setTimeout(resolve, 50))
+                  waitCount++
+                }
+                
+                if (ws.batchQueued.has(batchId)) {
+                  console.log(`[WS] Batch ${batchId} queued - GPU processing started`)
+                } else {
+                  console.warn(`[WS] Batch ${batchId} upload complete but batch_queued not received (timeout)`)
+                }
+              } else {
+                console.error(`[WS] Timeout waiting for batch ${prevBatchId} to be queued. Uploading batch ${batchId} anyway...`)
+                await ws.sendBatch(batch, batchId)
               }
-              
-              allProcessedImagesForDownload.push(processedImage)
-              setProcessedImages(prev => [...prev, processedImage])
             }
           }
+          
+          // Wait for all batches to complete processing
+          // Keep WebSocket open to receive all results
+          console.log('[WS] All batches uploaded, waiting for processing results...')
+          
+          // Wait for all batches to complete
+          const totalBatches = batches.length
+          let waitCount = 0
+          const maxWait = 600  // 60 seconds max wait (10 seconds per batch * 6 batches)
+          
+          while (ws.batchComplete.size < totalBatches && waitCount < maxWait) {
+            if (isCancelledRef.current) break
+            await new Promise(resolve => setTimeout(resolve, 100))
+            waitCount++
+            
+            // Log progress every 5 seconds
+            if (waitCount % 50 === 0) {
+              console.log(`[WS] Waiting for results: ${ws.batchComplete.size}/${totalBatches} batches complete`)
+            }
+          }
+          
+          if (ws.batchComplete.size >= totalBatches) {
+            console.log('[WS] All batches processing complete!')
+          } else {
+            console.log(`[WS] Timeout waiting for all batches (${ws.batchComplete.size}/${totalBatches} complete)`)
+          }
+          
+          // Don't close WebSocket here - let it stay open for a bit more to catch any late results
+          // The WebSocket will be closed when the component unmounts or user cancels
+          
         } catch (err) {
           if (err.name === 'AbortError' || isCancelledRef.current) {
             setIsLoading(false)
             return
           }
-          console.error('Error in batch processing:', err)
-          setError(err.message || 'Error processing images')
+          console.error('Error in WebSocket processing:', err)
+          
+          // If WebSocket fails, provide helpful error message
+          let errorMessage = err.message || 'Error processing images'
+          if (errorMessage.includes('WebSocket connection failed')) {
+            errorMessage = 'WebSocket connection failed. The server may not be configured to handle WebSocket connections. Please contact the administrator.'
+          }
+          
+          setError(errorMessage)
+          setIsLoading(false)
         }
       } else {
         // Local mode - just use original images
