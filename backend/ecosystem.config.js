@@ -17,7 +17,7 @@ module.exports = {
     instances: 1,
     autorestart: true,
     watch: false,
-    max_memory_restart: '2G',
+    max_memory_restart: '24G',  // Increased to 6GB for GPU model pools (4 GPUs)
     exec_mode: 'fork'
   }]
 };

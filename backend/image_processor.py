@@ -3,8 +3,6 @@ Image processing with GPU model pooling and reuse
 """
 from PIL import Image
 import io
-import base64
-import uuid
 from typing import Optional, Dict
 import torch
 
@@ -28,8 +26,11 @@ def initialize_model_pool():
         for gpu_id in range(num_gpus):
             print(f"[MODEL_POOL] Loading model on GPU {gpu_id}...")
             
-            # Create model instance for this GPU
-            model = WithoutBG(device=f"cuda:{gpu_id}")
+            # Set the CUDA device before creating the model
+            torch.cuda.set_device(gpu_id)
+            
+            # Create model instance using opensource() method
+            model = WithoutBG.opensource()
             _model_pool[gpu_id] = model
             
             print(f"[MODEL_POOL] Model loaded on GPU {gpu_id}")
@@ -72,12 +73,17 @@ def process_image_sync(
         from withoutbg import WithoutBG
         import numpy as np
         
-        # Determine GPU to use
+        # Determine GPU to use (round-robin if not specified)
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         if gpu_id is None:
-            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-            gpu_id = 0  # Default to GPU 0
+            # Simple round-robin based on a global counter
+            import time
+            gpu_id = int(time.time() * 1000) % num_gpus
         
         print(f"[PROCESSOR] Processing {filename} on GPU {gpu_id}")
+        
+        # Set CUDA device
+        torch.cuda.set_device(gpu_id)
         
         # Load image
         input_image = Image.open(io.BytesIO(image_data))
@@ -128,29 +134,21 @@ def process_image_sync(
         final_image.save(output_buffer, format=save_format, quality=95)
         output_bytes = output_buffer.getvalue()
         
-        # Generate unique ID
-        image_id = f"img_{uuid.uuid4().hex[:12]}"
+        # Determine output filename with correct extension
+        base_filename = filename.rsplit('.', 1)[0] if '.' in filename else filename
+        extension = "png" if save_format == "PNG" else "jpg"
+        output_filename = f"{base_filename}_no_bg.{extension}"
+        
+        # Determine MIME type
+        mime_type = f"image/{save_format.lower()}"
         
         print(f"[PROCESSOR] Image {filename} processed successfully on GPU {gpu_id}")
         
-        return {
-            "success": True,
-            "filename": filename,
-            "imageId": image_id,
-            "downloadUrl": f"/api/download/{image_id}",
-            "format": save_format,
-            "mimeType": f"image/{save_format.lower()}",
-            "_image_id": image_id,
-            "_image_data": output_bytes
-        }
+        # Return tuple expected by main.py: (bytes, mime_type, filename, format)
+        return (output_bytes, mime_type, output_filename, save_format)
         
     except Exception as e:
         print(f"[PROCESSOR] Error processing {filename}: {str(e)}")
         import traceback
         traceback.print_exc()
-        
-        return {
-            "success": False,
-            "filename": filename,
-            "error": str(e)
-        }
+        raise

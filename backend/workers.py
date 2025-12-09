@@ -10,9 +10,19 @@ import time
 
 # Global batch queue
 _batch_queue = asyncio.Queue()
+_batch_processor_started = False
 
 def get_batch_queue():
     return _batch_queue
+
+def start_batch_processor():
+    """Initialize the batch processor (currently using model pool instead of separate processor)"""
+    global _batch_processor_started
+    if not _batch_processor_started:
+        # Initialize model pool for batch processing
+        initialize_model_pool()
+        _batch_processor_started = True
+        print("[BATCH_PROCESSOR] Batch processor initialized with model pool")
 
 async def process_batch_async(
     batch_id: int,
@@ -61,7 +71,7 @@ async def process_batch_async(
                 
                 # Run in executor to avoid blocking
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
+                result_tuple = await loop.run_in_executor(
                     None,
                     process_image_sync,
                     image_bytes,
@@ -74,9 +84,31 @@ async def process_batch_async(
                 
                 elapsed = time.time() - start_time
                 
-                # Add batch and task metadata
-                result["batchId"] = batch_id
-                result["taskId"] = idx
+                # Unpack tuple: (output_bytes, mime_type, output_filename, save_format)
+                output_bytes, mime_type, output_filename, save_format = result_tuple
+                
+                # Convert to base64 for WebSocket transmission
+                import base64
+                import uuid
+                image_base64 = base64.b64encode(output_bytes).decode('utf-8')
+                image_url = f"data:{mime_type};base64,{image_base64}"
+                image_id = f"img_{uuid.uuid4().hex[:12]}"
+                download_url = f"/api/download?imageId={image_id}"
+                
+                # Create result dict with batch and task metadata
+                result = {
+                    "batchId": batch_id,
+                    "taskId": idx,
+                    "filename": output_filename,
+                    "imageUrl": image_url,
+                    "downloadUrl": download_url,
+                    "imageId": image_id,
+                    "format": save_format,
+                    "mimeType": mime_type,
+                    "_image_data": output_bytes,
+                    "_image_id": image_id,
+                    "success": True
+                }
                 
                 print(f"[WORKER] Image {idx} completed on GPU {assigned_gpu} in {elapsed:.2f}s")
                 
