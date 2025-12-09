@@ -30,6 +30,14 @@ async def websocket_process_images(websocket: WebSocket):
     await websocket.accept()
     connection_id = id(websocket)
     
+    # Track active processing tasks
+    active_tasks = []
+    
+    # Use a dict to track connection state (mutable, accessible in nested functions)
+    connection_state = {
+        'closed': False
+    }
+    
     try:
         # Initialize connection state
         config = {
@@ -67,24 +75,33 @@ async def websocket_process_images(websocket: WebSocket):
         # Callback to send results as they complete
         async def send_result_callback(result_dict):
             """Send processed image result to client and store image"""
+            if connection_state['closed']:
+                print(f"[WS] WebSocket closed, skipping result send")
+                return
+                
             try:
                 batch_id = result_dict.get("batchId")
+                task_id = result_dict.get("taskId")
+                
+                print(f"[WS] Sending result for batch {batch_id}, task {task_id}")
                 
                 # Store image data if provided (import here to avoid circular dependency)
                 if "_image_data" in result_dict and "_image_id" in result_dict:
                     import main
                     main.processed_images[result_dict["_image_id"]] = {
                         "data": result_dict["_image_data"],
-                        "filename": result_dict["filename"],
-                        "format": result_dict["format"],
-                        "mime_type": result_dict["mimeType"]
+                        "filename": result_dict.get("filename", "processed.jpg"),
+                        "format": result_dict.get("format", "JPEG"),
+                        "mime_type": result_dict.get("mimeType", "image/jpeg")
                     }
+                    print(f"[WS] Stored image {result_dict['_image_id']}")
+                    
                     # Remove internal fields before sending
                     result_dict = {k: v for k, v in result_dict.items() if not k.startswith("_")}
                 
                 # Track batch completion
                 if batch_id not in batch_completion_trackers:
-                    batch_completion_trackers[batch_id] = {"completed": 0}
+                    batch_completion_trackers[batch_id] = {"total": 0, "completed": 0}
                 batch_completion_trackers[batch_id]["completed"] += 1
                 
                 # Send to client immediately (streaming)
@@ -92,14 +109,24 @@ async def websocket_process_images(websocket: WebSocket):
                     "type": "image_processed",
                     **result_dict
                 })
+                print(f"[WS] Result sent successfully for batch {batch_id}, task {task_id}")
+                
+            except WebSocketDisconnect:
+                print(f"[WS] WebSocket disconnected while sending result")
+                connection_state['closed'] = True
             except Exception as e:
                 print(f"[WS] Error sending result: {str(e)}")
                 import traceback
                 traceback.print_exc()
         
         # Process messages
-        while True:
-            message = await websocket.receive()
+        while not connection_state['closed']:
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                print(f"[WS] WebSocket disconnected while receiving message")
+                connection_state['closed'] = True
+                break
             
             if message.get("type") == "websocket.receive":
                 # Handle text messages (metadata, commands)
@@ -110,6 +137,9 @@ async def websocket_process_images(websocket: WebSocket):
                         # Image metadata received, binary data will follow
                         task_id = data.get("taskId")
                         filename = data.get("filename", f"image_{task_id}")
+                        
+                        print(f"[WS] Received metadata for task {task_id}: {filename}")
+                        
                         # Store with batch-relative index
                         if task_id not in current_batch_data:
                             current_batch_data[task_id] = {
@@ -124,7 +154,7 @@ async def websocket_process_images(websocket: WebSocket):
                         expected_count = data.get("batchSize", len(current_batch_data))
                         
                         # Wait a moment for any remaining binary data to arrive
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.5)
                         
                         print(f"[WS] Batch {batch_id} upload complete, {len(current_batch_data)} images received (expected {expected_count})")
                         
@@ -132,11 +162,13 @@ async def websocket_process_images(websocket: WebSocket):
                         image_data_list = []
                         filenames_list = []
                         missing_data = []
+                        
                         for task_id in sorted(current_batch_data.keys()):
                             img_data = current_batch_data[task_id]
                             if img_data.get("data"):
                                 image_data_list.append(img_data["data"])
                                 filenames_list.append(img_data["filename"])
+                                print(f"[WS] Task {task_id}: {img_data['filename']} - {len(img_data['data'])} bytes")
                             else:
                                 missing_data.append(task_id)
                         
@@ -150,8 +182,9 @@ async def websocket_process_images(websocket: WebSocket):
                                 "completed": 0
                             }
                             
-                            # Notify client FIRST that batch processing will start (enables pipeline - next batch can upload)
-                            # This must be sent IMMEDIATELY so frontend knows it can upload next batch
+                            print(f"[WS] Starting processing for batch {batch_id} with {len(image_data_list)} images")
+                            
+                            # Notify client FIRST that batch processing will start (enables pipeline)
                             await websocket.send_json({
                                 "type": "batch_queued",
                                 "batchId": batch_id,
@@ -160,11 +193,10 @@ async def websocket_process_images(websocket: WebSocket):
                             print(f"[WS] Sent batch_queued for batch {batch_id} - frontend can now upload next batch")
                             
                             # Process batch immediately (non-blocking) - enables pipeline
-                            # This allows next batch to upload while this one processes
                             async def process_and_notify_complete():
                                 try:
                                     # Start processing immediately
-                                    print(f"[WS] Batch {batch_id} processing started immediately (pipelined)...")
+                                    print(f"[WS] Batch {batch_id} GPU processing started...")
                                     
                                     await process_batch_async(
                                         batch_id,
@@ -176,25 +208,39 @@ async def websocket_process_images(websocket: WebSocket):
                                         send_result_callback,
                                         None  # gpu_id (round-robin)
                                     )
-                                    # Notify batch complete
-                                    await websocket.send_json({
-                                        "type": "batch_complete",
-                                        "batchId": batch_id,
-                                        "message": f"Batch {batch_id} processing completed"
-                                    })
-                                    print(f"[WS] Batch {batch_id} processing completed")
+                                    
+                                    print(f"[WS] Batch {batch_id} processing completed!")
+                                    
+                                    # Only send batch_complete if websocket is still open
+                                    if not connection_state['closed']:
+                                        try:
+                                            await websocket.send_json({
+                                                "type": "batch_complete",
+                                                "batchId": batch_id,
+                                                "message": f"Batch {batch_id} processing completed"
+                                            })
+                                            print(f"[WS] Sent batch_complete for batch {batch_id}")
+                                        except Exception as e:
+                                            print(f"[WS] Error sending batch_complete: {str(e)}")
+                                    
                                 except Exception as e:
                                     print(f"[WS] Error processing batch {batch_id}: {str(e)}")
                                     import traceback
                                     traceback.print_exc()
-                                    await websocket.send_json({
-                                        "type": "batch_error",
-                                        "batchId": batch_id,
-                                        "error": str(e)
-                                    })
+                                    
+                                    if not connection_state['closed']:
+                                        try:
+                                            await websocket.send_json({
+                                                "type": "batch_error",
+                                                "batchId": batch_id,
+                                                "error": str(e)
+                                            })
+                                        except:
+                                            pass
                             
                             # Start processing immediately (non-blocking)
-                            asyncio.create_task(process_and_notify_complete())
+                            task = asyncio.create_task(process_and_notify_complete())
+                            active_tasks.append(task)
                             
                             # Reset for next batch
                             current_batch_id += 1
@@ -205,37 +251,54 @@ async def websocket_process_images(websocket: WebSocket):
                             print(f"[WS] Warning: Batch {batch_id} has no image data")
                     
                     elif data.get("type") == "close":
+                        print(f"[WS] Received close request from client")
                         break
                 
                 # Handle binary messages (image data)
                 elif "bytes" in message:
+                    binary_size = len(message["bytes"])
+                    
                     # Find the most recent task_id that doesn't have data yet
                     found = False
                     for task_id in sorted(current_batch_data.keys(), reverse=True):
                         if current_batch_data[task_id].get("data") is None:
                             current_batch_data[task_id]["data"] = message["bytes"]
                             current_batch_images.append(message["bytes"])
+                            print(f"[WS] Received binary data for task {task_id}: {binary_size} bytes")
                             found = True
                             break
+                    
                     if not found:
-                        print(f"[WS] Warning: Received binary data but no matching task_id found")
+                        print(f"[WS] Warning: Received binary data ({binary_size} bytes) but no matching task_id found")
             
             elif message.get("type") == "websocket.disconnect":
+                print(f"[WS] WebSocket disconnect message received")
+                connection_state['closed'] = True
                 break
+        
+        # Wait for active tasks to complete before closing
+        if active_tasks:
+            print(f"[WS] Waiting for {len(active_tasks)} active processing tasks to complete...")
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+            print(f"[WS] All processing tasks completed")
                 
     except WebSocketDisconnect:
-        print(f"[WS] WebSocket disconnected")
+        print(f"[WS] WebSocket disconnected (exception)")
+        connection_state['closed'] = True
     except Exception as e:
         print(f"[WS] Error: {str(e)}")
         import traceback
         traceback.print_exc()
         try:
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e)
-            })
+            if not connection_state['closed']:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": str(e)
+                })
         except:
             pass
     finally:
+        connection_state['closed'] = True
         if connection_id in _websocket_connections:
             del _websocket_connections[connection_id]
+        print(f"[WS] Connection {connection_id} closed")

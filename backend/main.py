@@ -62,6 +62,15 @@ processed_images = {}
 # Thread pool for GPU-bound operations (runs in executor)
 _executor = ThreadPoolExecutor(max_workers=min(32, NUM_GPUS * 8) if NUM_GPUS > 0 else 4)
 
+from image_processor import initialize_model_pool
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize model pool at startup"""
+    print("[STARTUP] Initializing GPU model pool...")
+    initialize_model_pool()
+    print("[STARTUP] Model pool ready!")
+
 async def process_single_image(file, bg_color, output_format, watermark_option):
     """
     Process a single image: remove background, apply color, and watermark.
