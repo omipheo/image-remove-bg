@@ -88,14 +88,6 @@ def process_image_sync(
         # Load image
         input_image = Image.open(io.BytesIO(image_data))
         
-        # Resize if too large (for speed)
-        max_size = 1024
-        if max(input_image.size) > max_size:
-            ratio = max_size / max(input_image.size)
-            new_size = tuple(int(dim * ratio) for dim in input_image.size)
-            input_image = input_image.resize(new_size, Image.LANCZOS)
-            print(f"[PROCESSOR] Resized image to {new_size}")
-        
         # Get pre-loaded model from pool (NO NEW MODEL CREATION)
         remover = get_model_for_gpu(gpu_id)
         
