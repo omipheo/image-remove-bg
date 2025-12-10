@@ -1,5 +1,5 @@
 """
-GPU Manager - Handles GPU detection, initialization, and transparent_background library patching for GPU usage.
+GPU Manager - Handles GPU detection, initialization, and transparent_background library setup for GPU usage.
 Enforces GPU-only operation - no CPU fallback.
 """
 import torch
@@ -91,7 +91,6 @@ def _patch_transparent_background_for_gpu():
             raise RuntimeError(error_msg)
         
         # Patch transparent_background's internal ONNX Runtime session creation if needed
-        # The transparent_background library may use onnxruntime internally
         try:
             import transparent_background
             

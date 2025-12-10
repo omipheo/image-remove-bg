@@ -2,12 +2,16 @@
 Workers for batch processing with model pooling
 """
 import asyncio
+import logging
 from typing import List, Callable, Optional
 from PIL import Image
 import io
+import base64
 from image_processor import process_image_sync, initialize_model_pool
 from gpu_manager import NUM_GPUS
 import time
+
+logger = logging.getLogger(__name__)
 
 # Global batch queue
 _batch_queue = asyncio.Queue()
@@ -29,6 +33,119 @@ def start_batch_processor():
         _batch_processor_started = True
         print("[BATCH_PROCESSOR] Batch processor initialized with model pool")
 
+
+async def process_batch_parallel(batch_images, batch_id, config, callback):
+    """
+    Process batch of images in parallel across GPUs - FIXED VERSION
+    
+    Args:
+        batch_images: dict of {task_id: {'image': PIL.Image, 'filename': str, 'task_id': int, 'batch_id': int}}
+        batch_id: int
+        config: dict with backgroundColor, fileType, watermark
+        callback: async function to call with each result
+    
+    Returns:
+        List of results
+    """
+    logger.info(f"[WORKER] Starting batch {batch_id} with {len(batch_images)} images")
+    
+    async def process_single_image(task_id, img_data):
+        """Process a single image and call callback"""
+        try:
+            pil_image = img_data['image']
+            filename = img_data['filename']
+            
+            # Convert PIL image to bytes
+            img_byte_arr = io.BytesIO()
+            pil_image.save(img_byte_arr, format='PNG')
+            img_byte_arr.seek(0)
+            image_bytes = img_byte_arr.read()
+            
+            # Get config
+            bg_color = config.get('backgroundColor', 'white')
+            file_type = config.get('fileType', 'JPEG')
+            watermark = config.get('watermark', 'none')
+            
+            # Process image using existing GPU function
+            logger.debug(f"[WORKER] Processing task {task_id}: {filename}")
+            start_time = time.time()
+            
+            result_tuple = await asyncio.to_thread(
+                process_image_sync,
+                image_bytes,
+                bg_color,
+                file_type,
+                watermark,
+                filename,
+                None  # gpu_id=None for round-robin
+            )
+            
+            elapsed = time.time() - start_time
+            
+            # Unpack result
+            output_bytes, mime_type, output_filename, save_format = result_tuple
+            
+            # Convert to base64
+            image_base64 = base64.b64encode(output_bytes).decode('utf-8')
+            
+            result = {
+                'batch_id': batch_id,
+                'task_id': task_id,
+                'filename': output_filename,
+                'image_data': image_base64,
+                'mime_type': mime_type,
+                'format': save_format,
+                'success': True
+            }
+            
+            logger.info(f"[WORKER] ✅ Task {task_id} complete in {elapsed:.2f}s: {filename}")
+            
+            # Send result via callback
+            if callback:
+                await callback(result)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"[WORKER] ❌ Error processing task {task_id}: {e}", exc_info=True)
+            
+            error_result = {
+                'batch_id': batch_id,
+                'task_id': task_id,
+                'filename': img_data.get('filename', 'unknown'),
+                'success': False,
+                'error': str(e)
+            }
+            
+            # Send error via callback
+            if callback:
+                try:
+                    await callback(error_result)
+                except Exception as cb_err:
+                    logger.error(f"[WORKER] Error in callback: {cb_err}")
+            
+            return error_result
+    
+    # Process all images in parallel
+    batch_start = time.time()
+    
+    tasks = [
+        process_single_image(task_id, img_data)
+        for task_id, img_data in batch_images.items()
+    ]
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    batch_elapsed = time.time() - batch_start
+    success_count = len([r for r in results if isinstance(r, dict) and r.get('success')])
+    
+    logger.info(f"[WORKER] Batch {batch_id} completed in {batch_elapsed:.2f}s "
+               f"({success_count}/{len(results)} successful)")
+    
+    return results
+
+
+# Keep the old function for backward compatibility if needed
 async def process_batch_async(
     batch_id: int,
     image_data_list: List[bytes],
@@ -40,22 +157,14 @@ async def process_batch_async(
     gpu_id: Optional[int] = None
 ):
     """
-    Process a batch of images using pre-loaded model pool.
-    
-    Key changes:
-    - High concurrency (10 images at once across 4 GPUs)
-    - Uses pre-loaded models (no OOM)
-    - Fast processing
+    Legacy batch processing function (kept for backward compatibility)
     """
-    import torch
-    
-    print(f"[WORKER] Starting batch {batch_id} with {len(image_data_list)} images")
+    logger.info(f"[WORKER] Starting legacy batch {batch_id} with {len(image_data_list)} images")
     
     if NUM_GPUS <= 0:
         raise RuntimeError("No GPUs available for processing")
-    print(f"[WORKER] Using {NUM_GPUS} GPU(s)")
     
-    # Shared semaphore to limit concurrent processing (NUM_GPUS * 3)
+    # Shared semaphore to limit concurrent processing
     semaphore = _processing_semaphore
     
     # Counter for round-robin GPU assignment
@@ -70,7 +179,7 @@ async def process_batch_async(
             gpu_counter += 1
             
             try:
-                print(f"[WORKER] Processing image {idx} on GPU {assigned_gpu}: {filename}")
+                logger.debug(f"[WORKER] Processing image {idx} on GPU {assigned_gpu}: {filename}")
                 start_time = time.time()
                 
                 # Run in executor to avoid blocking
@@ -83,51 +192,43 @@ async def process_batch_async(
                     file_type,
                     watermark,
                     filename,
-                    assigned_gpu  # Use assigned GPU
+                    assigned_gpu
                 )
                 
                 elapsed = time.time() - start_time
                 
-                # Unpack tuple: (output_bytes, mime_type, output_filename, save_format)
+                # Unpack tuple
                 output_bytes, mime_type, output_filename, save_format = result_tuple
                 
-                # Convert to base64 for WebSocket transmission
-                import base64
+                # Convert to base64
                 import uuid
                 image_base64 = base64.b64encode(output_bytes).decode('utf-8')
                 image_url = f"data:{mime_type};base64,{image_base64}"
                 image_id = f"img_{uuid.uuid4().hex[:12]}"
-                download_url = f"/api/download?imageId={image_id}"
                 
-                # Create result dict with batch and task metadata
                 result = {
                     "batchId": batch_id,
                     "taskId": idx,
                     "filename": output_filename,
                     "imageUrl": image_url,
-                    "downloadUrl": download_url,
                     "imageId": image_id,
                     "format": save_format,
                     "mimeType": mime_type,
                     "_image_data": output_bytes,
-                    "_imageId": image_id,  # Fixed: use _imageId consistently
+                    "_imageId": image_id,
                     "success": True
                 }
                 
-                print(f"[WORKER] Image {idx} completed on GPU {assigned_gpu} in {elapsed:.2f}s")
+                logger.info(f"[WORKER] Image {idx} completed on GPU {assigned_gpu} in {elapsed:.2f}s")
                 
-                # Send result via callback
                 if result_callback:
                     await result_callback(result)
                 
                 return result
                 
             except Exception as e:
-                print(f"[WORKER] Error processing image {idx}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"[WORKER] Error processing image {idx}: {str(e)}", exc_info=True)
                 
-                # Send error result
                 error_result = {
                     "batchId": batch_id,
                     "taskId": idx,
@@ -140,21 +241,20 @@ async def process_batch_async(
                     try:
                         await result_callback(error_result)
                     except Exception as callback_error:
-                        print(f"[WORKER] Error in callback: {str(callback_error)}")
+                        logger.error(f"[WORKER] Error in callback: {str(callback_error)}")
                 
                 return error_result
     
-    # Process all images concurrently (limited by semaphore)
+    # Process all images concurrently
     batch_start = time.time()
     tasks = [
         process_single_image(idx, img_data, filenames[idx])
         for idx, img_data in enumerate(image_data_list)
     ]
     
-    # Wait for all to complete
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     batch_elapsed = time.time() - batch_start
-    print(f"[WORKER] Batch {batch_id} completed in {batch_elapsed:.2f}s, processed {len(results)} images")
+    logger.info(f"[WORKER] Batch {batch_id} completed in {batch_elapsed:.2f}s")
     
     return results
