@@ -30,9 +30,8 @@ def initialize_model_pool():
             # Set the CUDA device before creating the model
             torch.cuda.set_device(gpu_id)
             
-            # Create model instance - transparent_background uses Remover class
-            # mode='fast' is faster, mode='base' is higher quality
-            model = Remover(device=f'cuda:{gpu_id}', mode='fast')  # Use 'fast' for speed!
+            # Use 'fast' mode for speed - optimized for RTX 3090
+            model = Remover(device=f'cuda:{gpu_id}', mode='fast', jit=False)
             _model_pool[gpu_id] = model
             
             print(f"[MODEL_POOL] Model loaded on GPU {gpu_id}")
@@ -98,6 +97,15 @@ def process_image_sync(
         if input_image.mode not in ('RGB', 'RGBA'):
             input_image = input_image.convert('RGB')
         
+        # CRITICAL OPTIMIZATION: Resize large images for speed
+        # 1024px = 4x faster than 2048px with minimal quality loss
+        max_dimension = 1024
+        if max(input_image.size) > max_dimension:
+            ratio = max_dimension / max(input_image.size)
+            new_size = tuple(int(dim * ratio) for dim in input_image.size)
+            input_image = input_image.resize(new_size, Image.LANCZOS)
+            print(f"[PROCESSOR] Resized {filename} to {new_size} for faster processing")
+        
         # Get pre-loaded model from pool (NO NEW MODEL CREATION)
         remover = get_model_for_gpu(gpu_id)
         
@@ -130,10 +138,7 @@ def process_images_batch(
 ) -> List[tuple]:
     """
     Process multiple images in a batch using transparent-background.
-    
-    IMPORTANT: transparent-background doesn't have true batch inference at API level,
-    but we can process images sequentially with the same model instance which is faster
-    than creating new model instances.
+    OPTIMIZED for 4x RTX 3090 setup.
     
     Args:
         image_data_list: List of raw image bytes
@@ -171,6 +176,14 @@ def process_images_batch(
                 img = Image.open(io.BytesIO(image_data))
                 if img.mode not in ('RGB', 'RGBA'):
                     img = img.convert('RGB')
+                
+                # CRITICAL OPTIMIZATION: Resize for speed
+                max_dimension = 1024
+                if max(img.size) > max_dimension:
+                    ratio = max_dimension / max(img.size)
+                    new_size = tuple(int(dim * ratio) for dim in img.size)
+                    img = img.resize(new_size, Image.LANCZOS)
+                
                 images.append(img)
                 valid_filenames.append(filename)
             except Exception as e:
@@ -281,7 +294,9 @@ def _finalize_image(
     if save_format == "JPEG" and final_image.mode in ("RGBA", "LA", "P"):
         final_image = final_image.convert("RGB")
     
-    final_image.save(output_buffer, format=save_format, quality=95)
+    # OPTIMIZATION: Reduce JPEG quality for faster processing
+    quality = 85 if save_format == "JPEG" else 95
+    final_image.save(output_buffer, format=save_format, quality=quality, optimize=True)
     output_bytes = output_buffer.getvalue()
     
     # Determine output filename with correct extension

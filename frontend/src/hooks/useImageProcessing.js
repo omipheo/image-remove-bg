@@ -158,9 +158,18 @@ export const useImageProcessing = () => {
               if (result.type === 'image_processed' && result.success) {
                 try {
                   // Download image from backend
-                  const fullUrl = result.downloadUrl.startsWith('http') 
-                    ? result.downloadUrl 
-                    : `${API_CONFIG.BASE_URL}${result.downloadUrl}`
+                  const downloadUrl = result.downloadUrl
+                  
+                  // Add null check for downloadUrl
+                  if (!downloadUrl) {
+                    console.error('No download URL in result:', result)
+                    return
+                  }
+                  
+                  const fullUrl = downloadUrl.startsWith('http') 
+                    ? downloadUrl 
+                    : `${API_CONFIG.BASE_URL}${downloadUrl}`
+                  
                   const response = await fetch(fullUrl)
                   if (!response.ok) throw new Error(`Download failed: ${response.statusText}`)
                   
@@ -170,35 +179,42 @@ export const useImageProcessing = () => {
                   // Find corresponding file using WebSocket service mapping
                   const file = ws.getFileForResult(result)
                   
-                  if (file) {
-                    const originalUrl = originalUrlsMap.get(file)
-                    let finalUrl = processedUrl
-                    
-                    // Apply watermark if needed
-                    if (watermark === 'blog') {
-                      finalUrl = await addWatermark(processedUrl, backgroundColor)
-                    }
-                    
-                    const processedImage = {
-                      file,
-                      originalUrl,
-                      processedUrl: finalUrl,
-                      imageId: result.imageId
-                    }
-                    
-                    allProcessedImagesForDownload.push(processedImage)
-                    setProcessedImages(prev => [...prev, processedImage])
+                  // Add null check for file
+                  if (!file) {
+                    console.error('Could not find file for result:', result)
+                    return
                   }
+                  
+                  const originalUrl = originalUrlsMap.get(file)
+                  
+                  // Add null check for originalUrl
+                  if (!originalUrl) {
+                    console.error('No original URL found for file:', file.name)
+                    return
+                  }
+                  
+                  let finalUrl = processedUrl
+                  
+                  // Apply watermark if needed
+                  if (watermark === 'blog') {
+                    finalUrl = await addWatermark(processedUrl, backgroundColor)
+                  }
+                  
+                  const processedImage = {
+                    file,
+                    originalUrl,
+                    processedUrl: finalUrl,
+                    imageId: result.imageId
+                  }
+                  
+                  allProcessedImagesForDownload.push(processedImage)
+                  setProcessedImages(prev => [...prev, processedImage])
                 } catch (err) {
                   console.error(`Error processing result for image ${result.taskId}:`, err)
                 }
-              } else if (result.type === 'batch_complete') {
-                console.log(`[WS] Batch ${result.batchId} complete`)
-              } else if (result.type === 'batch_queued') {
-                console.log(`[WS] Batch ${result.batchId} queued - GPU processing started`)
               }
             },
-            // onError
+                        // onError
             (error) => {
               console.error('[WS] Error:', error)
               setError(error.message || 'WebSocket error')

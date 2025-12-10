@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 # Global batch queue
 _batch_queue = asyncio.Queue()
 _batch_processor_started = False
-_processing_semaphore = asyncio.Semaphore(max(1, NUM_GPUS * 3))
+# OPTIMIZATION: Increase concurrency for 4x RTX 3090
+_processing_semaphore = asyncio.Semaphore(max(1, NUM_GPUS * 8))  # Increased from *3 to *8
 
 def get_processing_semaphore():
     return _processing_semaphore
@@ -36,7 +37,7 @@ def start_batch_processor():
 
 async def process_batch_parallel(batch_images, batch_id, config, callback):
     """
-    Process batch of images in parallel across GPUs - FIXED VERSION
+    Process batch of images in parallel across GPUs - OPTIMIZED for 4x RTX 3090
     
     Args:
         batch_images: dict of {task_id: {'image': PIL.Image, 'filename': str, 'task_id': int, 'batch_id': int}}
@@ -55,11 +56,19 @@ async def process_batch_parallel(batch_images, batch_id, config, callback):
             pil_image = img_data['image']
             filename = img_data['filename']
             
+            # Validate image
+            if not pil_image:
+                raise ValueError(f"No image data for task {task_id}")
+            
             # Convert PIL image to bytes
             img_byte_arr = io.BytesIO()
             pil_image.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
             image_bytes = img_byte_arr.read()
+            
+            # Validate bytes
+            if len(image_bytes) == 0:
+                raise ValueError(f"Empty image bytes for task {task_id}")
             
             # Get config
             bg_color = config.get('backgroundColor', 'white')
@@ -85,14 +94,25 @@ async def process_batch_parallel(batch_images, batch_id, config, callback):
             # Unpack result
             output_bytes, mime_type, output_filename, save_format = result_tuple
             
-            # Convert to base64
-            image_base64 = base64.b64encode(output_bytes).decode('utf-8')
+            # Generate image ID
+            import uuid
+            image_id = f"img_{batch_id}_{task_id}_{int(time.time())}"
+            
+            # Store the processed image in main.processed_images
+            import main
+            main.processed_images[image_id] = {
+                'data': output_bytes,
+                'filename': output_filename,
+                'format': save_format,
+                'mime_type': mime_type
+            }
             
             result = {
                 'batch_id': batch_id,
                 'task_id': task_id,
                 'filename': output_filename,
-                'image_data': image_base64,
+                'downloadUrl': f'/api/download?imageId={image_id}',
+                'imageId': image_id,
                 'mime_type': mime_type,
                 'format': save_format,
                 'success': True
@@ -134,6 +154,7 @@ async def process_batch_parallel(batch_images, batch_id, config, callback):
         for task_id, img_data in batch_images.items()
     ]
     
+    # CRITICAL: Ensure we return the results
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     batch_elapsed = time.time() - batch_start
@@ -142,6 +163,7 @@ async def process_batch_parallel(batch_images, batch_id, config, callback):
     logger.info(f"[WORKER] Batch {batch_id} completed in {batch_elapsed:.2f}s "
                f"({success_count}/{len(results)} successful)")
     
+    # CRITICAL: Return the results list
     return results
 
 

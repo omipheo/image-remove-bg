@@ -1,15 +1,6 @@
 /**
  * OPTIMIZED WebSocket Service for Fast Image Uploads
- * 
- * KEY IMPROVEMENTS:
- * 1. PARALLEL file reading (10 files at once instead of 1)
- * 2. Chunked uploads (prevents buffer overflow)
- * 3. Flow control (prevents overwhelming the connection)
- * 
- * PERFORMANCE:
- * - Old: 60+ seconds for 100 images (sequential)
- * - New: 3-5 seconds for 100 images (parallel)
- * - 12-20x faster! ðŸš€
+ * OPTIMIZED FOR 4x RTX 3090 + 600 Mbps Upload
  */
 
 import { API_CONFIG } from '../config/api'
@@ -26,10 +17,10 @@ export class ImageProcessingWebSocket {
     this.batchComplete = new Set()
     this.batchFiles = new Map()
     
-    // OPTIMIZATION: Parallel upload configuration
-    this.maxConcurrentUploads = 10  // Upload 10 files in parallel
-    this.chunkSize = 256 * 1024     // 256KB chunks (prevents buffer overflow)
-    this.maxBufferSize = 1024 * 1024 // 1MB buffer threshold
+    // OPTIMIZATION: Increased for 600 Mbps upload speed
+    this.maxConcurrentUploads = 20  // Increased from 10 to 20
+    this.chunkSize = 512 * 1024     // Increased from 256KB to 512KB
+    this.maxBufferSize = 2048 * 1024 // Increased from 1MB to 2MB
   }
 
   connect(backgroundColor, fileType, watermark, batchSize = 100) {
@@ -52,13 +43,12 @@ export class ImageProcessingWebSocket {
         
         console.log('[WS] Connecting to:', wsUrl)
         this.ws = new WebSocket(wsUrl)
-        this.ws.binaryType = 'arraybuffer'  // Optimize binary data handling
+        this.ws.binaryType = 'arraybuffer'
         
         this.ws.onopen = () => {
-          console.log('[WS] âœ… WebSocket connected')
+          console.log('[WS] ✅ WebSocket connected')
           this.isConnected = true
           
-          // Send configuration
           this.ws.send(JSON.stringify({
             type: 'config',
             backgroundColor: backgroundColor || 'white',
@@ -79,16 +69,16 @@ export class ImageProcessingWebSocket {
             } else if (data.type === 'batch_queued') {
               const batchId = data.batchId
               this.batchQueued.add(batchId)
-              console.log(`[WS] ðŸš€ Batch ${batchId} queued - GPU processing started`)
+              console.log(`[WS] 🚀 Batch ${batchId} queued - GPU processing started`)
               if (this.onResult) this.onResult(data)
             } else if (data.type === 'image_processed') {
               if (this.onResult) this.onResult(data)
             } else if (data.type === 'batch_complete') {
               this.batchComplete.add(data.batchId)
-              console.log(`[WS] âœ… Batch ${data.batchId} complete`)
+              console.log(`[WS] ✅ Batch ${data.batchId} complete`)
               if (this.onResult) this.onResult(data)
             } else if (data.type === 'batch_error' || data.type === 'error') {
-              console.error('[WS] âŒ Error:', data.error || data.message)
+              console.error('[WS] ❌ Error:', data.error || data.message)
               if (this.onError) {
                 this.onError(new Error(data.error || data.message || 'Processing error'))
               }
@@ -100,7 +90,7 @@ export class ImageProcessingWebSocket {
         }
         
         this.ws.onerror = (error) => {
-          console.error('[WS] âŒ WebSocket error:', error)
+          console.error('[WS] ❌ WebSocket error:', error)
           this.isConnected = false
           const errorMsg = new Error('WebSocket connection failed')
           if (this.onError) this.onError(errorMsg)
@@ -118,26 +108,25 @@ export class ImageProcessingWebSocket {
     })
   }
 
-  /**
-   * OPTIMIZED: Send batch with parallel uploads
-   * Old: Sequential (1 file at a time) = 60+ seconds
-   * New: Parallel (10 files at a time) = 3-5 seconds
-   */
   async sendBatch(files, batchId) {
     if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket not connected')
     }
     
-    console.log(`[WS] ðŸ“¤ Starting PARALLEL upload for batch ${batchId} (${files.length} files)`)
+    console.log(`[WS] 📤 Starting PARALLEL upload for batch ${batchId} (${files.length} files)`)
     const startTime = performance.now()
     
-    // Store files for this batch
     this.batchFiles.set(batchId, files)
     
-    // Upload files in parallel with concurrency control
     await this._uploadFilesParallel(files, batchId)
     
-    // Send batch_end when all uploads complete
+    // CRITICAL: Wait for buffer to drain
+    console.log(`[WS] Waiting for buffer to drain (current: ${this.ws.bufferedAmount} bytes)...`)
+    await this._waitForBufferDrain()
+    
+    // Additional safety delay
+    await new Promise(resolve => setTimeout(resolve, 300))  // Reduced from 500ms to 300ms
+    
     this.ws.send(JSON.stringify({
       type: 'batch_end',
       batchId: batchId,
@@ -149,18 +138,13 @@ export class ImageProcessingWebSocket {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(2)
     const throughput = (files.length / elapsed).toFixed(1)
     const mbps = ((files.reduce((sum, f) => sum + f.size, 0) * 8 / 1000000) / elapsed).toFixed(1)
-    console.log(`[WS] âœ… Batch ${batchId} uploaded in ${elapsed}s (${throughput} files/sec, ${mbps} Mbps)`)
+    console.log(`[WS] ✅ Batch ${batchId} uploaded in ${elapsed}s (${throughput} files/sec, ${mbps} Mbps)`)
   }
 
-  /**
-   * CORE OPTIMIZATION: Upload files in parallel
-   * Uses worker pool pattern with concurrency limit
-   */
   async _uploadFilesParallel(files, batchId) {
     let uploadIndex = 0
     const totalFiles = files.length
     
-    // Worker function: uploads one file then picks up next
     const uploadWorker = async (workerId) => {
       while (uploadIndex < totalFiles) {
         const currentIndex = uploadIndex++
@@ -169,13 +153,11 @@ export class ImageProcessingWebSocket {
         try {
           await this._uploadSingleFile(file, currentIndex, batchId)
         } catch (error) {
-          console.error(`[WS] âŒ Worker ${workerId} failed on file ${currentIndex}:`, error)
-          // Continue with next file instead of failing entire batch
+          console.error(`[WS] ❌ Worker ${workerId} failed on file ${currentIndex}:`, error)
         }
       }
     }
     
-    // Start worker pool
     const workers = []
     const workerCount = Math.min(this.maxConcurrentUploads, totalFiles)
     
@@ -183,21 +165,12 @@ export class ImageProcessingWebSocket {
       workers.push(uploadWorker(i))
     }
     
-    // Wait for all workers to complete
     await Promise.all(workers)
   }
 
-  /**
-   * Upload a single file with optimizations:
-   * - Direct ArrayBuffer reading (faster than base64)
-   * - Chunked sending (prevents buffer overflow)
-   * - Flow control (backpressure handling)
-   */
   async _uploadSingleFile(file, taskId, batchId) {
-    // Read file as ArrayBuffer (faster than base64)
     const arrayBuffer = await file.arrayBuffer()
     
-    // Send metadata first
     this.ws.send(JSON.stringify({
       type: 'image_metadata',
       filename: file.name,
@@ -206,7 +179,6 @@ export class ImageProcessingWebSocket {
       size: arrayBuffer.byteLength
     }))
     
-    // Send binary data (chunked if large)
     if (arrayBuffer.byteLength > this.chunkSize) {
       await this._sendChunked(arrayBuffer)
     } else {
@@ -215,9 +187,6 @@ export class ImageProcessingWebSocket {
     }
   }
 
-  /**
-   * Send large files in chunks to prevent buffer overflow
-   */
   async _sendChunked(arrayBuffer) {
     const totalChunks = Math.ceil(arrayBuffer.byteLength / this.chunkSize)
     
@@ -231,10 +200,6 @@ export class ImageProcessingWebSocket {
     }
   }
 
-  /**
-   * FLOW CONTROL: Wait if WebSocket buffer is too full
-   * Prevents overwhelming the connection
-   */
   async _waitForBuffer() {
     if (this.ws.bufferedAmount > this.maxBufferSize) {
       await new Promise(resolve => {
@@ -249,15 +214,39 @@ export class ImageProcessingWebSocket {
       })
     }
   }
+
+  async _waitForBufferDrain() {
+    while (this.ws.bufferedAmount > 0) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+      if (this.ws.bufferedAmount > 0) {
+        console.log(`[WS] Buffer draining: ${this.ws.bufferedAmount} bytes remaining...`)
+      }
+    }
+    console.log(`[WS] ✅ Buffer fully drained`)
+  }
   
   getFileForResult(result) {
     const batchId = result.batchId
     const taskId = result.taskId
     const batchFiles = this.batchFiles.get(batchId)
-    if (batchFiles && taskId >= 0 && taskId < batchFiles.length) {
-      return batchFiles[taskId]
+    
+    if (!batchFiles) {
+      console.warn(`[WS] No batch files found for batch ${batchId}`)
+      return null
     }
-    return null
+    
+    if (taskId < 0 || taskId >= batchFiles.length) {
+      console.warn(`[WS] Task ID ${taskId} out of range for batch ${batchId} (size: ${batchFiles.length})`)
+      return null
+    }
+    
+    const file = batchFiles[taskId]
+    if (!file) {
+      console.warn(`[WS] File not found for batch ${batchId}, task ${taskId}`)
+      return null
+    }
+    
+    return file
   }
 
   close() {

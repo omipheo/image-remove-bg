@@ -148,7 +148,7 @@ class ParallelImageBatchHandler:
             'filename': metadata['filename']
         }
         
-        logger.info(f"[WS] âœ… Task {task_id} (batch {batch_id}) complete: {metadata['filename']}")
+        logger.info(f"[WS] ✅ Task {task_id} (batch {batch_id}) complete: {metadata['filename']}")
         
         # Clean up
         del self.pending_metadata[key]
@@ -162,17 +162,17 @@ class ParallelImageBatchHandler:
         logger.info(f"[WS] Received batch_end for batch {batch_id} (size: {batch_size})")
         self.batch_end_received.add(batch_id)
         
-        # Wait a moment for any in-flight data
-        await asyncio.sleep(0.2)
+        # Wait longer for any in-flight data (INCREASED from 0.2s to 0.5s)
+        await asyncio.sleep(0.5)
         
         # Check completion status
         complete_count = sum(1 for k in self.complete_images if k[0] == batch_id)
         logger.info(f"[WS] Batch {batch_id} status: {complete_count}/{batch_size} images complete")
         
-        # Wait a bit longer if close to complete
+        # Wait longer if close to complete (INCREASED from 0.5s to 1.0s)
         if complete_count >= batch_size * 0.9 and complete_count < batch_size:
             logger.info(f"[WS] Waiting for remaining images in batch {batch_id}...")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             complete_count = sum(1 for k in self.complete_images if k[0] == batch_id)
             logger.info(f"[WS] After wait: {complete_count}/{batch_size} complete")
         
@@ -186,7 +186,7 @@ class ParallelImageBatchHandler:
             return
         
         self.processing_batches.add(batch_id)
-        logger.info(f"[WS] ðŸš€ Starting processing for batch {batch_id}")
+        logger.info(f"[WS] 🚀 Starting processing for batch {batch_id}")
         
         # Send batch_queued notification
         await self.ws.send_json({
@@ -218,19 +218,21 @@ class ParallelImageBatchHandler:
         
         logger.info(f"[WS] Processing {len(batch_images)}/{batch_size} images for batch {batch_id}")
         
-        # Process images using your existing worker
-        from workers import process_batch_parallel
-        
+        # Define callback to send results back to client
         async def send_result_callback(result):
             """Callback to send results back to client"""
             await self.ws.send_json({
                 'type': 'image_processed',
                 'batchId': result.get('batch_id'),
                 'taskId': result.get('task_id'),
-                'imageData': result.get('image_data'),  # base64
+                'downloadUrl': result.get('downloadUrl'),
+                'imageId': result.get('imageId'),
                 'filename': result.get('filename'),
                 'success': result.get('success', True)
             })
+        
+        # Import process_batch_parallel here to avoid circular import
+        from workers import process_batch_parallel
         
         try:
             results = await process_batch_parallel(
@@ -240,6 +242,11 @@ class ParallelImageBatchHandler:
                 callback=send_result_callback
             )
             
+            # CRITICAL: Add null check for results
+            if results is None:
+                logger.error(f"[WS] Batch {batch_id} returned None results")
+                results = []
+            
             # Clean up processed images
             for task_id in range(batch_size):
                 key = (batch_id, task_id)
@@ -247,7 +254,7 @@ class ParallelImageBatchHandler:
                     del self.complete_images[key]
             
             # Send batch_complete
-            success_count = len([r for r in results if r.get('success')])
+            success_count = len([r for r in results if isinstance(r, dict) and r.get('success')])
             await self.ws.send_json({
                 'type': 'batch_complete',
                 'batchId': batch_id,
@@ -255,7 +262,7 @@ class ParallelImageBatchHandler:
                 'totalCount': len(results)
             })
             
-            logger.info(f"[WS] âœ… Batch {batch_id} complete ({success_count}/{len(results)} successful)")
+            logger.info(f"[WS] ✅ Batch {batch_id} complete ({success_count}/{len(results)} successful)")
             
         except Exception as e:
             logger.error(f"[WS] Error processing batch {batch_id}: {e}", exc_info=True)
@@ -271,7 +278,7 @@ class ParallelImageBatchHandler:
 async def websocket_endpoint(websocket: WebSocket):
     """Main WebSocket endpoint - PARALLEL UPLOAD VERSION"""
     await websocket.accept()
-    logger.info("[WS] âœ… WebSocket connection accepted")
+    logger.info("[WS] ✅ WebSocket connection accepted")
     
     try:
         # Wait for configuration
