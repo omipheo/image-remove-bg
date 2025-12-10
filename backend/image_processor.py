@@ -11,14 +11,14 @@ _model_pool: Dict[int, any] = {}
 _model_pool_initialized = False
 
 def initialize_model_pool():
-    """Initialize one WithoutBG model per GPU (called at startup)"""
+    """Initialize one TransparentBackground model per GPU (called at startup)"""
     global _model_pool, _model_pool_initialized
     
     if _model_pool_initialized:
         return
     
     try:
-        from withoutbg import WithoutBG
+        from transparent_background import Remover
         
         num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
         print(f"[MODEL_POOL] Initializing model pool with {num_gpus} GPU(s)")
@@ -29,8 +29,9 @@ def initialize_model_pool():
             # Set the CUDA device before creating the model
             torch.cuda.set_device(gpu_id)
             
-            # Create model instance using opensource() method
-            model = WithoutBG.opensource()
+            # Create model instance - transparent_background uses Remover class
+            # device='cuda' will use the current CUDA device
+            model = Remover(device=f'cuda:{gpu_id}')
             _model_pool[gpu_id] = model
             
             print(f"[MODEL_POOL] Model loaded on GPU {gpu_id}")
@@ -70,7 +71,6 @@ def process_image_sync(
     - Much faster, no OOM errors
     """
     try:
-        from withoutbg import WithoutBG
         import numpy as np
         
         # Determine GPU to use (round-robin if not specified)
@@ -91,8 +91,8 @@ def process_image_sync(
         # Get pre-loaded model from pool (NO NEW MODEL CREATION)
         remover = get_model_for_gpu(gpu_id)
         
-        # Process image
-        processed_image = remover.remove_background(input_image)
+        # Process image - transparent_background uses process() method
+        processed_image = remover.process(input_image)
         
         # Apply background color
         if background_color.lower() == "transparent":

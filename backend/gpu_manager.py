@@ -1,10 +1,9 @@
 """
-GPU Manager - Handles GPU detection, initialization, and withoutbg library patching for GPU usage.
+GPU Manager - Handles GPU detection, initialization, and transparent_background library patching for GPU usage.
 Enforces GPU-only operation - no CPU fallback.
 """
 import torch
 import onnxruntime
-from withoutbg import WithoutBG
 import os
 import sys
 import ctypes
@@ -12,7 +11,7 @@ import glob
 
 # Global GPU count
 NUM_GPUS = 0
-_gpu_instances = {}  # {gpu_id: WithoutBG instance}
+_gpu_instances = {}  # {gpu_id: Remover instance}
 _gpu_counter = 0  # For round-robin assignment
 
 def _setup_cuda_library_path():
@@ -59,10 +58,10 @@ def _setup_cuda_library_path():
                     except OSError:
                         pass
 
-def _patch_withoutbg_for_gpu():
+def _patch_transparent_background_for_gpu():
     """
-    Patch the withoutbg library to use GPU (CUDAExecutionProvider) instead of CPU.
-    This must be called before importing or using WithoutBG.
+    Patch the transparent_background library to use GPU (CUDAExecutionProvider) instead of CPU.
+    This must be called before importing or using Remover.
     """
     try:
         # Try to set up CUDA library paths
@@ -91,31 +90,34 @@ def _patch_withoutbg_for_gpu():
             )
             raise RuntimeError(error_msg)
         
-        # Patch withoutbg's internal ONNX Runtime session creation
-        # The withoutbg library uses onnxruntime internally, we need to ensure it uses CUDA
-        import withoutbg
+        # Patch transparent_background's internal ONNX Runtime session creation if needed
+        # The transparent_background library may use onnxruntime internally
+        try:
+            import transparent_background
+            
+            # Check if it uses onnxruntime.InferenceSession, we can patch it
+            original_inference_session = onnxruntime.InferenceSession
+            
+            def patched_inference_session(*args, **kwargs):
+                # Force CUDA provider if providers not explicitly set
+                if 'providers' not in kwargs:
+                    kwargs['providers'] = ['CUDAExecutionProvider']
+                elif 'CUDAExecutionProvider' not in kwargs['providers']:
+                    # Prepend CUDA provider
+                    kwargs['providers'] = ['CUDAExecutionProvider'] + kwargs['providers']
+                return original_inference_session(*args, **kwargs)
+            
+            # Apply patch
+            onnxruntime.InferenceSession = patched_inference_session
+            print("Successfully patched transparent_background for GPU usage (CUDAExecutionProvider)")
+        except ImportError:
+            # transparent_background may not use onnxruntime, or uses it differently
+            print("Note: transparent_background may use PyTorch directly for GPU")
         
-        # Check if withoutbg has a way to configure providers
-        # If it uses onnxruntime.InferenceSession, we can patch it
-        original_inference_session = onnxruntime.InferenceSession
-        
-        def patched_inference_session(*args, **kwargs):
-            # Force CUDA provider if providers not explicitly set
-            if 'providers' not in kwargs:
-                kwargs['providers'] = ['CUDAExecutionProvider']
-            elif 'CUDAExecutionProvider' not in kwargs['providers']:
-                # Prepend CUDA provider
-                kwargs['providers'] = ['CUDAExecutionProvider'] + kwargs['providers']
-            return original_inference_session(*args, **kwargs)
-        
-        # Apply patch
-        onnxruntime.InferenceSession = patched_inference_session
-        
-        print("Successfully patched withoutbg for GPU usage (CUDAExecutionProvider)")
         return True
         
     except Exception as e:
-        error_msg = f"Failed to patch withoutbg for GPU: {str(e)}"
+        error_msg = f"Failed to patch transparent_background for GPU: {str(e)}"
         print(error_msg)
         import traceback
         traceback.print_exc()
@@ -128,8 +130,8 @@ def initialize_gpus():
     """
     global NUM_GPUS
     
-    # Patch withoutbg first, before any WithoutBG instances are created
-    _patch_withoutbg_for_gpu()
+    # Patch transparent_background first, before any Remover instances are created
+    _patch_transparent_background_for_gpu()
     
     # Detect available GPUs - GPU REQUIRED
     if not torch.cuda.is_available():
@@ -153,13 +155,13 @@ def initialize_gpus():
 
 def get_instance(gpu_id=None):
     """
-    Get a WithoutBG instance for the specified GPU, or round-robin if gpu_id is None.
+    Get a Remover instance for the specified GPU, or round-robin if gpu_id is None.
     
     Args:
         gpu_id: GPU ID (0 to NUM_GPUS-1) or None for round-robin assignment
     
     Returns:
-        WithoutBG instance configured for GPU
+        Remover instance configured for GPU
     
     Raises:
         RuntimeError: If no GPUs available or initialization fails
@@ -184,14 +186,14 @@ def get_instance(gpu_id=None):
             # Set CUDA device before creating instance
             torch.cuda.set_device(gpu_id)
             
-            # Create WithoutBG instance using opensource (local GPU processing)
-            # WithoutBG is a base class, we need to use opensource() or api() method
-            instance = WithoutBG.opensource()
+            # Create Remover instance for transparent_background
+            from transparent_background import Remover
+            instance = Remover(device=f'cuda:{gpu_id}')
             
             _gpu_instances[gpu_id] = instance
-            print(f"Created WithoutBG opensource instance for GPU {gpu_id}")
+            print(f"Created Remover instance for GPU {gpu_id}")
         except Exception as e:
-            error_msg = f"Failed to create WithoutBG instance for GPU {gpu_id}: {str(e)}"
+            error_msg = f"Failed to create Remover instance for GPU {gpu_id}: {str(e)}"
             print(error_msg)
             import traceback
             traceback.print_exc()

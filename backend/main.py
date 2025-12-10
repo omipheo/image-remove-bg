@@ -17,7 +17,7 @@ import base64
 from image_processor import process_image_sync
 from workers import get_batch_queue, start_batch_processor
 from gpu_manager import NUM_GPUS
-from websocket_routes import websocket_process_images
+from websocket_routes import websocket_process_images, set_processed_images_store
 
 # Load environment variables from .env file
 load_dotenv()
@@ -58,6 +58,8 @@ app.add_middleware(
 
 # Store processed images temporarily (in production, use a proper storage solution)
 processed_images = {}
+# Provide reference to websocket routes for download storage
+set_processed_images_store(processed_images)
 
 # Thread pool for GPU-bound operations (runs in executor)
 _executor = ThreadPoolExecutor(max_workers=min(32, NUM_GPUS * 8) if NUM_GPUS > 0 else 4)
@@ -182,7 +184,8 @@ async def upload_image(request: Request):
             "data": processed_image_bytes,
             "filename": processed_filename,
             "format": output_format,
-            "mime_type": mime_type
+            "mime_type": mime_type,
+            "pre_uploaded": True  # Mark as pre-uploaded via /api/upload
         }
         
         return {
@@ -522,13 +525,13 @@ def add_checkerboard_background(img_with_alpha):
 @app.get("/api/download")
 async def download_image(imageId: str = None, fileType: str = None):
     """
-    Download the processed image.
-    If imageId is provided, returns that specific image.
+    Download the processed image or zip file.
+    If imageId is provided, returns that specific image or zip file.
     Otherwise, returns the most recently processed image.
     
     Parameters:
-    - imageId: ID of the image to download
-    - fileType: Optional override for file type ("PNG" or "JPEG")
+    - imageId: ID of the image/zip to download (e.g., "img_xxx" or "zip_xxx")
+    - fileType: Optional override for file type ("PNG" or "JPEG") - only for images
     """
     try:
         image_data = None
@@ -542,6 +545,23 @@ async def download_image(imageId: str = None, fileType: str = None):
         else:
             raise HTTPException(status_code=404, detail="No processed image found")
         
+        # Handle zip files
+        if imageId and imageId.startswith("zip_") and "file_path" in image_data:
+            zip_path = image_data["file_path"]
+            if os.path.exists(zip_path):
+                with open(zip_path, 'rb') as f:
+                    zip_bytes = f.read()
+                return Response(
+                    content=zip_bytes,
+                    media_type="application/zip",
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{image_data["filename"]}"'
+                    }
+                )
+            else:
+                raise HTTPException(status_code=404, detail="Zip file not found")
+        
+        # Handle regular images
         # If fileType is specified, convert the image
         if fileType and fileType.upper() in ["PNG", "JPEG"]:
             output_format = "PNG" if fileType.upper() == "PNG" else "JPEG"

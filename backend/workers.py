@@ -6,11 +6,16 @@ from typing import List, Callable, Optional
 from PIL import Image
 import io
 from image_processor import process_image_sync, initialize_model_pool
+from gpu_manager import NUM_GPUS
 import time
 
 # Global batch queue
 _batch_queue = asyncio.Queue()
 _batch_processor_started = False
+_processing_semaphore = asyncio.Semaphore(max(1, NUM_GPUS * 3))
+
+def get_processing_semaphore():
+    return _processing_semaphore
 
 def get_batch_queue():
     return _batch_queue
@@ -46,13 +51,12 @@ async def process_batch_async(
     
     print(f"[WORKER] Starting batch {batch_id} with {len(image_data_list)} images")
     
-    # Get number of GPUs
-    NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    if NUM_GPUS <= 0:
+        raise RuntimeError("No GPUs available for processing")
     print(f"[WORKER] Using {NUM_GPUS} GPU(s)")
     
-    # Semaphore to limit concurrent processing (2-3 per GPU = 8-12 total for 4 GPUs)
-    max_concurrent = NUM_GPUS * 2  # 2 images per GPU concurrently
-    semaphore = asyncio.Semaphore(max_concurrent)
+    # Shared semaphore to limit concurrent processing (NUM_GPUS * 3)
+    semaphore = _processing_semaphore
     
     # Counter for round-robin GPU assignment
     gpu_counter = 0
@@ -106,7 +110,7 @@ async def process_batch_async(
                     "format": save_format,
                     "mimeType": mime_type,
                     "_image_data": output_bytes,
-                    "_image_id": image_id,
+                    "_imageId": image_id,  # Fixed: use _imageId consistently
                     "success": True
                 }
                 
