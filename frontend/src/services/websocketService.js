@@ -78,6 +78,17 @@ export class ImageProcessingWebSocket {
               this.batchComplete.add(data.batchId)
               console.log(`[WS] ✅ Batch ${data.batchId} complete`)
               if (this.onResult) this.onResult(data)
+            } else if (data.type === 'batch_zip_ready') {
+              console.log(`[WS] 📦 ZIP ready for batch ${data.batchId}:`, data.downloadUrl)
+
+              // Notify React hook or component
+              if (this.onResult) this.onResult(data)
+
+              // AUTOMATIC MODE: download ZIP instantly
+              if (window.downloadMode === 'automatic') {
+                console.log('[WS] ⬇️ Automatic ZIP download triggered')
+                window.location.href = data.downloadUrl
+              }
             } else if (data.type === 'batch_error' || data.type === 'error') {
               console.error('[WS] ❌ Error:', data.error || data.message)
               if (this.onError) {

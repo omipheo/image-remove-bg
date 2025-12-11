@@ -286,6 +286,35 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.post("/api/create-zip")
+async def create_zip_endpoint(request: Request):
+    """
+    Create ZIP file containing all processed images.
+    Optionally filter by batch IDs.
+    """
+    try:
+        import workers
+        processed_images_dict = workers.get_processed_images()
+        
+        body = await request.json()
+        batch_ids = body.get("batchIds", None)
+        
+        zip_id = workers.create_zip_for_all_images(processed_images_dict, batch_ids)
+        
+        return {
+            "zipId": zip_id,
+            "imageId": zip_id,
+            "downloadUrl": f"/api/download?imageId={zip_id}",
+            "success": True
+        }
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating ZIP: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
 @app.get("/api/debug/processed-images")
 async def debug_processed_images():
     """
