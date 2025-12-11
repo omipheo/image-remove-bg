@@ -6,6 +6,7 @@ import OptionsSection from '../components/OptionsSection'
 import ImageComparison from '../components/ImageComparison'
 import MultipleImagesGrid from '../components/MultipleImagesGrid'
 import ErrorMessage from '../components/ErrorMessage'
+import DebugPanel from '../components/DebugPanel'
 import '../styles/pages/HomePage.css'
 
 const HomePage = () => {
@@ -47,11 +48,11 @@ const HomePage = () => {
       return
     }
 
-    if (imageFiles.length === 1) {
-      processImage(imageFiles[0], backgroundColor, fileType, watermark, downloadMode)
-    } else {
+    // if (imageFiles.length === 1) {
+    //   processImage(imageFiles[0], backgroundColor, fileType, watermark, downloadMode)
+    // } else {
       processMultipleImages(imageFiles, backgroundColor, fileType, watermark, downloadMode)
-    }
+    // }
   }
 
   return (
@@ -102,6 +103,8 @@ const HomePage = () => {
         isLoading={isLoading}
         showDownload={downloadMode === 'manual'}
       />
+
+      <DebugPanel frontendProcessedImages={processedImages} />
     </div>
   )
 }

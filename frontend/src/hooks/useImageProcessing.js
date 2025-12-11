@@ -33,33 +33,33 @@ export const useImageProcessing = () => {
     try {
       // Read and display original image first
       const originalUrl = await readImageAsDataURL(file)
-      
+
       if (isCancelledRef.current) {
         setIsLoading(false)
         return
       }
-      
+
       setOriginalImageUrl(originalUrl)
 
       if (API_CONFIG.USE_BACKEND) {
         // Backend mode
         const result = await uploadImageToBackend(file, backgroundColor, fileType, abortControllerRef.current.signal)
-        
+
         if (isCancelledRef.current) {
           setIsLoading(false)
           return
         }
-        
+
         // Apply watermark if needed
         let finalImageUrl = result.imageUrl
         if (watermark === 'blog') {
           finalImageUrl = await addWatermark(result.imageUrl, backgroundColor)
         }
-        
+
         setImageUrl(finalImageUrl)
         setImageId(result.imageId)
         setIsLoading(false)
-        
+
         // Auto-download if enabled
         if (downloadMode === 'automatic') {
           // Small delay to ensure UI updates and state is set
@@ -98,9 +98,9 @@ export const useImageProcessing = () => {
     }
   }
 
-  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'manual') => {
-    // Batch size is fixed at 100 images per batch
-    const BATCH_SIZE = 100
+  const processMultipleImages = async (files, backgroundColor, fileType, watermark = 'none', downloadMode = 'automatic') => {
+    // Batch size is fixed at 20 images per batch
+    const BATCH_SIZE = 20
     const imageFiles = files.filter(file => file.type.startsWith('image/'))
     if (imageFiles.length === 0) {
       setError('Please select at least one image file')
@@ -118,24 +118,24 @@ export const useImageProcessing = () => {
     if (imageFiles.length > 0) {
       // For single image, don't auto-download here (it will be handled in processImage)
       await processImage(imageFiles[0], backgroundColor, fileType, watermark, imageFiles.length === 1 ? downloadMode : 'manual')
-      
+
       if (isCancelledRef.current) {
         return
       }
     }
 
     // Process remaining images using batch upload
-    if (imageFiles.length > 1) {
+    if (imageFiles.length > 0) {
       setIsLoading(true)
       // Clear previous processed images
       setProcessedImages([])
-      
+
       // Collect all processed images for auto-download
       const allProcessedImagesForDownload = []
-      
+
       // Get remaining images (skip first one as it's already processed)
-      const remainingImages = imageFiles.slice(1)
-      
+      const remainingImages = imageFiles.slice(0)
+
       if (API_CONFIG.USE_BACKEND) {
         // Use WebSocket for pipelined processing
         try {
@@ -145,12 +145,14 @@ export const useImageProcessing = () => {
             const originalUrl = await readImageAsDataURL(file)
             originalUrlsMap.set(file, originalUrl)
           }))
-          
+
+          console.log(`[WS] Original URLs: ${JSON.stringify(originalUrlsMap)}`)
+
           if (isCancelledRef.current) {
             setIsLoading(false)
             return
           }
-          
+
           // Create WebSocket connection
           const ws = new ImageProcessingWebSocket(
             // onResult - called for each processed image (streaming)
@@ -159,62 +161,80 @@ export const useImageProcessing = () => {
                 try {
                   // Download image from backend
                   const downloadUrl = result.downloadUrl
-                  
+                  console.log(`[WS] Download URL: ${downloadUrl}`)
+                  console.log(`[WS] Result: ${JSON.stringify(result)}`)
                   // Add null check for downloadUrl
                   if (!downloadUrl) {
                     console.error('No download URL in result:', result)
                     return
                   }
-                  
-                  const fullUrl = downloadUrl.startsWith('http') 
-                    ? downloadUrl 
+
+                  const fullUrl = downloadUrl.startsWith('http')
+                    ? downloadUrl
                     : `${API_CONFIG.BASE_URL}${downloadUrl}`
-                  
+
+                  console.log(`[WS] Downloading from: ${fullUrl} for taskId=${result.taskId}`)
                   const response = await fetch(fullUrl)
                   if (!response.ok) throw new Error(`Download failed: ${response.statusText}`)
-                  
+
                   const imageBlob = await response.blob()
+                  console.log(`[WS] Downloaded blob for taskId=${result.taskId}: size=${imageBlob.size} bytes, type=${imageBlob.type}`)
                   const processedUrl = URL.createObjectURL(imageBlob)
-                  
+                  console.log(`[WS] Created blob URL for taskId=${result.taskId}: ${processedUrl.substring(0, 50)}...`)
+
                   // Find corresponding file using WebSocket service mapping
+                  console.log(`[WS] Processing result: batchId=${result.batchId}, taskId=${result.taskId}, imageId=${result.imageId}`)
                   const file = ws.getFileForResult(result)
-                  
+
                   // Add null check for file
                   if (!file) {
                     console.error('Could not find file for result:', result)
                     return
                   }
-                  
+
+                  console.log(`[WS] Found file: ${file.name} for batchId=${result.batchId}, taskId=${result.taskId}`)
                   const originalUrl = originalUrlsMap.get(file)
-                  
+
                   // Add null check for originalUrl
                   if (!originalUrl) {
-                    console.error('No original URL found for file:', file.name)
+                    console.error(`No original URL found for file: ${file.name}. Available files in map:`, Array.from(originalUrlsMap.keys()).map(f => f.name))
                     return
                   }
-                  
+
+                  console.log(`[WS] ✅ Successfully matched processed image to original: ${file.name}`)
+
                   let finalUrl = processedUrl
-                  
+
                   // Apply watermark if needed
-                  if (watermark === 'blog') {
-                    finalUrl = await addWatermark(processedUrl, backgroundColor)
-                  }
-                  
+                  // if (watermark === 'blog') {
+                  //   finalUrl = await addWatermark(processedUrl, backgroundColor)
+                  // }
+
                   const processedImage = {
                     file,
                     originalUrl,
                     processedUrl: finalUrl,
                     imageId: result.imageId
                   }
-                  
+
+                  console.log(`[WS] ✅ Created processedImage for ${file.name}: imageId=${result.imageId}, processedUrl=${finalUrl.substring(0, 50)}...`)
                   allProcessedImagesForDownload.push(processedImage)
-                  setProcessedImages(prev => [...prev, processedImage])
+                  setProcessedImages(prev => {
+                    const newList = [...prev, processedImage]
+                    console.log(`[WS] Updated processedImages state: now ${newList.length} images`)
+                    console.log('[DEBUG] processedImages:', newList.map(p => ({
+                      file: p.file.name,
+                      imageId: p.imageId,
+                      processedUrl: p.processedUrl?.slice(0, 80)
+                    })))
+                    return newList
+                  })
                 } catch (err) {
                   console.error(`Error processing result for image ${result.taskId}:`, err)
                 }
               }
             },
-                        // onError
+            // onError
             (error) => {
               console.error('[WS] Error:', error)
               setError(error.message || 'WebSocket error')
@@ -226,35 +246,35 @@ export const useImageProcessing = () => {
               setIsLoading(false)
             }
           )
-          
+
           // Connect WebSocket
           await ws.connect(backgroundColor, fileType, watermark, BATCH_SIZE)
-          
-          // Split into batches of 100
+
+          // Split into batches of 20
           const batches = []
           for (let i = 0; i < remainingImages.length; i += BATCH_SIZE) {
             batches.push(remainingImages.slice(i, i + BATCH_SIZE))
           }
-          
+
           // Pipeline workflow: Upload batch 0 → Process batch 0 (while uploading batch 1) → etc.
           for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             if (isCancelledRef.current) break
-            
+
             const batch = batches[batchIndex]
             const batchId = batchIndex
-            
+
             if (batchIndex === 0) {
               // First batch: upload immediately
               console.log(`[WS] Uploading batch ${batchId} (${batch.length} images)`)
               await ws.sendBatch(batch, batchId)
-              
+
               // Wait for batch_queued (GPU started processing) - this signals we can upload next batch
               let waitCount = 0
               while (!ws.batchQueued.has(batchId) && waitCount < 200) {
                 await new Promise(resolve => setTimeout(resolve, 50))
                 waitCount++
               }
-              
+
               if (ws.batchQueued.has(batchId)) {
                 console.log(`[WS] Batch ${batchId} queued - GPU processing started, can upload next batch`)
               } else {
@@ -273,19 +293,19 @@ export const useImageProcessing = () => {
                   console.log(`[WS] Still waiting for batch ${prevBatchId} to be queued... (${waitCount * 50}ms)`)
                 }
               }
-              
+
               if (ws.batchQueued.has(prevBatchId)) {
                 // Now upload this batch (previous batch is already processing)
                 console.log(`[WS] Batch ${prevBatchId} is processing, uploading batch ${batchId} (${batch.length} images)`)
                 await ws.sendBatch(batch, batchId)
-                
+
                 // Wait for this batch to be queued (processing started)
                 waitCount = 0
                 while (!ws.batchQueued.has(batchId) && waitCount < 200) {
                   await new Promise(resolve => setTimeout(resolve, 50))
                   waitCount++
                 }
-                
+
                 if (ws.batchQueued.has(batchId)) {
                   console.log(`[WS] Batch ${batchId} queued - GPU processing started`)
                 } else {
@@ -297,49 +317,49 @@ export const useImageProcessing = () => {
               }
             }
           }
-          
+
           // Wait for all batches to complete processing
           // Keep WebSocket open to receive all results
           console.log('[WS] All batches uploaded, waiting for processing results...')
-          
+
           // Wait for all batches to complete
           const totalBatches = batches.length
           let waitCount = 0
           const maxWait = 600  // 60 seconds max wait (10 seconds per batch * 6 batches)
-          
+
           while (ws.batchComplete.size < totalBatches && waitCount < maxWait) {
             if (isCancelledRef.current) break
             await new Promise(resolve => setTimeout(resolve, 100))
             waitCount++
-            
+
             // Log progress every 5 seconds
             if (waitCount % 50 === 0) {
               console.log(`[WS] Waiting for results: ${ws.batchComplete.size}/${totalBatches} batches complete`)
             }
           }
-          
+
           if (ws.batchComplete.size >= totalBatches) {
             console.log('[WS] All batches processing complete!')
           } else {
             console.log(`[WS] Timeout waiting for all batches (${ws.batchComplete.size}/${totalBatches} complete)`)
           }
-          
+
           // Don't close WebSocket here - let it stay open for a bit more to catch any late results
           // The WebSocket will be closed when the component unmounts or user cancels
-          
+
         } catch (err) {
           if (err.name === 'AbortError' || isCancelledRef.current) {
             setIsLoading(false)
             return
           }
           console.error('Error in WebSocket processing:', err)
-          
+
           // If WebSocket fails, provide helpful error message
           let errorMessage = err.message || 'Error processing images'
           if (errorMessage.includes('WebSocket connection failed')) {
             errorMessage = 'WebSocket connection failed. The server may not be configured to handle WebSocket connections. Please contact the administrator.'
           }
-          
+
           setError(errorMessage)
           setIsLoading(false)
         }
@@ -355,7 +375,7 @@ export const useImageProcessing = () => {
       }
 
       setIsLoading(false)
-      
+
       // Auto-download if enabled (for multiple images, download all as ZIP)
       if (downloadMode === 'automatic' && !isCancelledRef.current) {
         // Small delay to ensure UI updates
@@ -364,7 +384,7 @@ export const useImageProcessing = () => {
             // Create ZIP with all images
             const zip = new JSZip()
             const imagesToZip = []
-            
+
             // Add first image (from imageUrl state)
             if (imageUrl && currentFile) {
               imagesToZip.push({
@@ -372,7 +392,7 @@ export const useImageProcessing = () => {
                 file: currentFile
               })
             }
-            
+
             // Add all remaining processed images
             allProcessedImagesForDownload.forEach(item => {
               imagesToZip.push({
@@ -380,12 +400,12 @@ export const useImageProcessing = () => {
                 file: item.file
               })
             })
-            
+
             if (imagesToZip.length === 0) {
               console.warn('No processed images found for auto-download')
               return
             }
-            
+
             // Create ZIP
             for (let i = 0; i < imagesToZip.length; i++) {
               const item = imagesToZip[i]
@@ -397,10 +417,10 @@ export const useImageProcessing = () => {
                 console.error(`Error adding ${item.file.name} to ZIP:`, err)
               }
             }
-            
+
             // Generate and download ZIP
             if (Object.keys(zip.files).length > 0) {
-              const zipBlob = await zip.generateAsync({ 
+              const zipBlob = await zip.generateAsync({
                 type: 'blob',
                 compression: 'DEFLATE',
                 compressionOptions: { level: 6 }
@@ -452,7 +472,7 @@ export const useImageProcessing = () => {
 
   const downloadAllProcessedImages = async (fileType, asZip = false) => {
     const imagesToDownload = []
-    
+
     // Add main processed image if available
     if (imageUrl && currentFile) {
       imagesToDownload.push({
@@ -461,7 +481,7 @@ export const useImageProcessing = () => {
         imageId: imageId
       })
     }
-    
+
     // Add all processed images from the array
     if (processedImages && processedImages.length > 0) {
       processedImages.forEach(item => {
@@ -472,22 +492,22 @@ export const useImageProcessing = () => {
         })
       })
     }
-    
+
     if (imagesToDownload.length === 0) {
       setError('No processed images to download')
       return
     }
-    
+
     try {
       if (asZip) {
         // Download as ZIP file
         console.log('Creating ZIP file with', imagesToDownload.length, 'images')
         const zip = new JSZip()
-        
+
         for (let i = 0; i < imagesToDownload.length; i++) {
           const item = imagesToDownload[i]
           let blob
-          
+
           try {
             // Use the watermarked URL from state (already has watermark applied)
             if (item.url && item.url.startsWith('data:')) {
@@ -501,11 +521,11 @@ export const useImageProcessing = () => {
             } else {
               throw new Error(`No valid URL for image ${i + 1}`)
             }
-            
+
             if (!blob || blob.size === 0) {
               throw new Error(`Failed to get blob for image ${i + 1}`)
             }
-            
+
             const filename = generateDownloadFilename(item.file.name, fileType)
             console.log(`Adding to ZIP: ${filename} (${blob.size} bytes)`)
             zip.file(filename, blob)
@@ -514,21 +534,21 @@ export const useImageProcessing = () => {
             // Continue with other images even if one fails
           }
         }
-        
+
         // Check if ZIP has any files
         const fileCount = Object.keys(zip.files).length
         if (fileCount === 0) {
           throw new Error('No images were successfully added to the ZIP file')
         }
-        
+
         console.log(`Generating ZIP file with ${fileCount} images`)
         // Generate ZIP file
-        const zipBlob = await zip.generateAsync({ 
+        const zipBlob = await zip.generateAsync({
           type: 'blob',
           compression: 'DEFLATE',
           compressionOptions: { level: 6 }
         })
-        
+
         console.log(`ZIP file generated: ${zipBlob.size} bytes`)
         const zipFilename = `processed-images-${new Date().toISOString().slice(0, 10)}.zip`
         downloadFile(zipBlob, zipFilename)
@@ -537,12 +557,12 @@ export const useImageProcessing = () => {
         // Download all images individually with a small delay between each
         for (let i = 0; i < imagesToDownload.length; i++) {
           const item = imagesToDownload[i]
-          
+
           // Use the watermarked URL from state (already has watermark applied)
           const blob = dataURLToBlob(item.url)
           const filename = generateDownloadFilename(item.file.name, fileType)
           downloadFile(blob, filename)
-          
+
           // Small delay between downloads to prevent browser from blocking multiple downloads
           if (i < imagesToDownload.length - 1) {
             await new Promise(resolve => setTimeout(resolve, 200))

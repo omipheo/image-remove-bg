@@ -211,6 +211,7 @@ async def download_image(imageId: str = None, fileType: str = None):
         
         if imageId and imageId in processed_images:
             image_data = processed_images[imageId]
+            print(f"[DOWNLOAD] Serving imageId={imageId}, filename={image_data.get('filename', 'unknown')}, size={len(image_data.get('data', []))} bytes")
         elif processed_images:
             # Return the most recent image
             latest_id = list(processed_images.keys())[-1]
@@ -284,6 +285,54 @@ async def download_image(imageId: str = None, fileType: str = None):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.get("/api/debug/processed-images")
+async def debug_processed_images():
+    """
+    Debug endpoint to see all processed images stored in memory.
+    Returns metadata about all processed images without the actual image data.
+    """
+    try:
+        # Use the workers module's reference to ensure we see the same dictionary
+        # that the workers are storing images in
+        import workers
+        actual_processed_images = workers.get_processed_images()
+        
+        print(f"[DEBUG] Local processed_images id: {id(processed_images)}, keys: {list(processed_images.keys())}")
+        print(f"[DEBUG] Workers processed_images id: {id(actual_processed_images)}, keys: {list(actual_processed_images.keys())}")
+        print(f"[DEBUG] Using workers reference (same instance workers use)")
+        
+        images_list = []
+        for image_id, image_data in actual_processed_images.items():
+            try:
+                img_info = {
+                    "imageId": image_id,
+                    "filename": image_data.get("filename", "unknown"),
+                    "format": image_data.get("format", "unknown"),
+                    "mime_type": image_data.get("mime_type", "unknown"),
+                    "size_bytes": len(image_data.get("data", b"")),
+                    "pre_uploaded": image_data.get("pre_uploaded", False),
+                    "downloadUrl": f"/api/download?imageId={image_id}"
+                }
+                images_list.append(img_info)
+                print(f"[DEBUG] Image: {image_id} - {img_info['filename']} ({img_info['size_bytes']} bytes, pre_uploaded={img_info['pre_uploaded']})")
+            except Exception as img_error:
+                print(f"[DEBUG] Error processing image {image_id}: {img_error}")
+                import traceback
+                print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+        
+        print(f"[DEBUG] Total images in response: {len(images_list)}")
+        return {
+            "total_images": len(images_list),
+            "images": images_list
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 if __name__ == "__main__":

@@ -6,11 +6,13 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, 
   return (
     <div className="multiple-images-section">
       <h2 className="section-title">
-        Additional Processed Images ({processedImages.length})
+        All Processed Images ({processedImages.length})
         {isLoading && <span className="processing-indicator">Processing...</span>}
       </h2>
       <div className="images-grid">
-        {processedImages.map((item, index) => (
+        {processedImages.map((item, index) => {
+          console.log(`[GRID] Rendering item ${index}: file=${item.file.name}, imageId=${item.imageId}, processedUrl=${item.processedUrl?.substring(0, 50)}...`)
+          return (
           <div key={item.imageId || `${item.file.name}-${index}`} className="image-card">
             <div className="image-card-header">
               <h4 className="image-card-title">{item.file.name}</h4>
@@ -26,7 +28,13 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, 
               <div className="image-card-item">
                 <p className="image-card-label">Processed</p>
                 <div className="image-card-container">
-                  <img src={item.processedUrl} alt={`Processed ${item.file.name}`} />
+                  <img 
+                    key={item.imageId} 
+                    src={item.processedUrl} 
+                    alt={`Processed ${item.file.name}`}
+                    onLoad={() => console.log(`[GRID] Image loaded: ${item.file.name}, imageId=${item.imageId}, url=${item.processedUrl.substring(0, 50)}...`)}
+                    onError={(e) => console.error(`[GRID] Image error: ${item.file.name}, url=${item.processedUrl.substring(0, 50)}...`, e)}
+                  />
                 </div>
               </div>
             </div>
@@ -41,7 +49,8 @@ const MultipleImagesGrid = ({ processedImages, onDownload, fileType, isLoading, 
               </button>
             )}
           </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
