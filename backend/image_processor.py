@@ -1,11 +1,13 @@
 """
 Image processing with GPU model pooling and BATCH processing using transparent-background
 """
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 from typing import Optional, Dict, List
 import torch
 import numpy as np
+import math
+import os
 
 # Global model pool - one model per GPU, initialized once
 _model_pool: Dict[int, any] = {}
@@ -231,6 +233,297 @@ def process_images_batch(
         traceback.print_exc()
         raise
 
+def _add_watermark_design(image: Image.Image, background_color: str, watermark: str) -> Image.Image:
+    """
+    Add watermark design matching the frontend addWatermark function.
+    Creates "PEDALS to METAL.com" watermark with circles, rounded rectangle, and text.
+    
+    Args:
+        image: PIL Image to add watermark to
+        background_color: Background color for determining watermark color
+        watermark: Watermark text (if "blog", uses "PEDALS to METAL.com" design)
+    
+    Returns:
+        PIL Image with watermark added
+    """
+    if watermark.lower() == "blog":
+        # Use the full "PEDALS to METAL.com" design
+        return _add_pedals_to_metal_watermark(image, background_color)
+    else:
+        # Simple text watermark for other cases
+        return _add_simple_text_watermark(image, background_color, watermark)
+
+
+def _add_pedals_to_metal_watermark(image: Image.Image, background_color: str) -> Image.Image:
+    """
+    Add "PEDALS to METAL.com" watermark design matching frontend implementation.
+    """
+    draw = ImageDraw.Draw(image)
+    
+    # Calculate sizes based on image dimensions (matching frontend)
+    base_font_size = max(14, int(image.width * 0.025))  # 2.5% of width, min 14px
+    small_font_size = max(10, int(base_font_size * 0.7))  # Smaller font for .com
+    
+    # Determine watermark color based on background
+    bg_color = background_color.lower()
+    watermark_color = (0, 0, 0) if (bg_color == 'white' or bg_color == 'transparent') else (255, 255, 255)
+    
+    # Load fonts
+    bold_font = _load_font(base_font_size, bold=True)
+    italic_font = _load_font(int(base_font_size * 0.6), italic=True)
+    small_italic_font = _load_font(small_font_size, italic=True)
+    
+    # Text parts
+    pedals_text = 'PEDALS'
+    to_text = 'to'
+    metal_text = 'METAL'
+    com_text = '.com'
+    
+    # Measure text widths
+    pedals_bbox = draw.textbbox((0, 0), pedals_text, font=bold_font)
+    pedals_width = pedals_bbox[2] - pedals_bbox[0]
+    
+    to_bbox = draw.textbbox((0, 0), to_text, font=italic_font)
+    to_width = to_bbox[2] - to_bbox[0]
+    
+    metal_bbox = draw.textbbox((0, 0), metal_text, font=bold_font)
+    metal_width = metal_bbox[2] - metal_bbox[0]
+    
+    com_bbox = draw.textbbox((0, 0), com_text, font=small_italic_font)
+    com_width = com_bbox[2] - com_bbox[0]
+    
+    main_text_width = pedals_width + 5 + to_width + 5 + metal_width + 5 + com_width
+    main_text_height = base_font_size
+    
+    # Calculate circle dimensions (three circles like pedal knobs)
+    circle_radius = max(6, int(image.width * 0.01))  # 1% of width, min 6px
+    circle_spacing = int(circle_radius * 2.2)
+    circles_width = (circle_radius * 2 * 3) + (circle_spacing * 2)
+    
+    # Rounded rectangle around circles
+    rect_padding = int(circle_radius * 0.8)
+    rect_width = circles_width + (rect_padding * 2)
+    rect_height = (circle_radius * 2) + (rect_padding * 2)
+    rect_radius = int(circle_radius * 0.5)
+    
+    # Total watermark dimensions
+    watermark_width = max(rect_width, main_text_width)
+    watermark_height = rect_height + 10 + main_text_height
+    
+    # Position: bottom right with padding
+    padding = max(10, int(image.width * 0.02))  # 2% of width, min 10px
+    watermark_x = image.width - watermark_width - padding
+    watermark_y = image.height - watermark_height - padding
+    
+    # Draw rounded rectangle around circles
+    rect_x = watermark_x + (watermark_width - rect_width) // 2
+    rect_y = watermark_y
+    
+    # Draw rounded rectangle (simplified - PIL doesn't have roundRect)
+    draw.rectangle(
+        [(rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height)],
+        outline=watermark_color,
+        width=2
+    )
+    
+    # Draw three circles with gear-like appearance
+    circle_y = rect_y + rect_padding + circle_radius
+    circle_start_x = rect_x + rect_padding + circle_radius
+    
+    for i in range(3):
+        circle_x = circle_start_x + (i * (circle_radius * 2 + circle_spacing))
+        
+        # Draw circle with wavy edge (gear-like)
+        # Create a path with multiple points for wavy edge
+        circle_points = []
+        segments = 16
+        for j in range(segments + 1):
+            angle = (j / segments) * math.pi * 2
+            wave_offset = math.sin(angle * 4) * (circle_radius * 0.1)
+            r = circle_radius + wave_offset
+            x = circle_x + math.cos(angle) * r
+            y = circle_y + math.sin(angle) * r
+            circle_points.append((x, y))
+        
+        # Draw circle outline
+        if len(circle_points) > 1:
+            draw.polygon(circle_points, outline=watermark_color, width=1)
+        
+        # Draw inner knob: central dot
+        inner_radius = int(circle_radius * 0.15)
+        draw.ellipse(
+            [(circle_x - inner_radius, circle_y - inner_radius),
+             (circle_x + inner_radius, circle_y + inner_radius)],
+            fill=watermark_color
+        )
+        
+        # Draw inner knob: pointer line (12 o'clock position)
+        pointer_length = int(circle_radius * 0.6)
+        pointer_end_x = circle_x
+        pointer_end_y = circle_y - pointer_length
+        draw.line(
+            [(circle_x, circle_y), (pointer_end_x, pointer_end_y)],
+            fill=watermark_color,
+            width=1
+        )
+    
+    # Draw text "PEDALS to METAL.com"
+    text_y = rect_y + rect_height + 10
+    text_x = watermark_x + (watermark_width - main_text_width) // 2
+    
+    # Draw "PEDALS"
+    pedals_x = text_x
+    draw.text((pedals_x, text_y), pedals_text, fill=watermark_color, font=bold_font)
+    
+    # Draw "to"
+    to_x = pedals_x + pedals_width + 5
+    draw.text((to_x, int(text_y + base_font_size * 0.2)), to_text, fill=watermark_color, font=italic_font)
+    
+    # Draw "METAL"
+    metal_x = to_x + to_width + 5
+    draw.text((metal_x, text_y), metal_text, fill=watermark_color, font=bold_font)
+    
+    # Draw ".com" with cloud-like outline
+    com_x = metal_x + metal_width + 5
+    com_y = int(text_y + (base_font_size - small_font_size) + 2)
+    
+    # Draw cloud-like outline around ".com"
+    cloud_padding = 3
+    cloud_width = com_width + (cloud_padding * 2)
+    cloud_height = small_font_size + (cloud_padding * 2)
+    cloud_x = com_x - cloud_padding
+    cloud_y = com_y - cloud_padding
+    
+    # Create irregular cloud-like shape
+    cloud_points = []
+    cloud_points_count = 8
+    center_x = cloud_x + cloud_width // 2
+    center_y = cloud_y + cloud_height // 2
+    base_radius = min(cloud_width, cloud_height) // 2
+    
+    for i in range(cloud_points_count + 1):
+        angle = (i / cloud_points_count) * math.pi * 2
+        radius_variation = 1 + math.sin(angle * 3) * 0.3
+        r = base_radius * radius_variation
+        x = center_x + math.cos(angle) * r
+        y = center_y + math.sin(angle) * r
+        cloud_points.append((x, y))
+    
+    if len(cloud_points) > 2:
+        draw.polygon(cloud_points, outline=watermark_color, width=1)
+    
+    # Draw ".com" text
+    draw.text((com_x, com_y), com_text, fill=watermark_color, font=small_italic_font)
+    
+    return image
+
+
+def _add_simple_text_watermark(image: Image.Image, background_color: str, watermark: str) -> Image.Image:
+    """
+    Add simple text watermark (for non-blog watermarks).
+    """
+    draw = ImageDraw.Draw(image)
+    
+    # Get watermark text
+    text = watermark.upper() if watermark.lower() == "blog" else watermark
+    
+    # Calculate font size based on image size
+    base_font_size = max(20, int(image.width * 0.025))
+    font = _load_font(base_font_size, bold=True)
+    
+    # Determine text color based on background
+    if background_color.lower() in ("white", "transparent"):
+        text_color = (0, 0, 0)  # Black
+        outline_color = (255, 255, 255)  # White outline
+    else:
+        text_color = (255, 255, 255)  # White
+        outline_color = (0, 0, 0)  # Black outline
+    
+    # Calculate text position
+    padding = max(15, int(image.width * 0.02))
+    
+    # Get text bounding box
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    except:
+        text_width = len(text) * base_font_size * 0.6
+        text_height = base_font_size
+    
+    # Position: bottom right
+    x = image.width - text_width - padding
+    y = image.height - text_height - padding
+    
+    # Draw text outline for visibility
+    outline_width = max(1, int(base_font_size * 0.05))
+    for adj in range(-outline_width, outline_width + 1):
+        for adj2 in range(-outline_width, outline_width + 1):
+            if adj != 0 or adj2 != 0:
+                draw.text((x + adj, y + adj2), text, fill=outline_color, font=font)
+    
+    # Draw main text
+    draw.text((x, y), text, fill=text_color, font=font)
+    
+    return image
+
+
+def _load_font(size: int, bold: bool = False, italic: bool = False) -> ImageFont.FreeTypeFont:
+    """
+    Load font with fallback options.
+    """
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "arial.ttf",
+        "Arial.ttf",
+    ]
+    
+    # Try bold italic first if both requested
+    if bold and italic:
+        for path in font_paths:
+            if "Bold" in path and ("Oblique" in path or "Italic" in path):
+                try:
+                    if os.path.exists(path):
+                        return ImageFont.truetype(path, size)
+                except:
+                    continue
+    
+    # Try bold
+    if bold:
+        for path in font_paths:
+            if "Bold" in path and "Oblique" not in path and "Italic" not in path:
+                try:
+                    if os.path.exists(path):
+                        return ImageFont.truetype(path, size)
+                except:
+                    continue
+    
+    # Try italic
+    if italic:
+        for path in font_paths:
+            if ("Italic" in path or "Oblique" in path) and "Bold" not in path:
+                try:
+                    if os.path.exists(path):
+                        return ImageFont.truetype(path, size)
+                except:
+                    continue
+    
+    # Try any font
+    for path in font_paths:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        except:
+            continue
+    
+    # Fallback to default
+    return ImageFont.load_default()
+
+
 def _finalize_image(
     processed_image: Image.Image,
     background_color: str,
@@ -274,18 +567,7 @@ def _finalize_image(
     
     # Add watermark if needed
     if watermark and watermark.lower() != "none":
-        from PIL import ImageDraw, ImageFont
-        draw = ImageDraw.Draw(final_image)
-        
-        # Simple watermark in corner
-        text = watermark
-        position = (10, final_image.height - 30)
-        # Try to use default font
-        try:
-            font = ImageFont.truetype("arial.ttf", 20)
-        except:
-            font = ImageFont.load_default()
-        draw.text(position, text, fill=(128, 128, 128), font=font)
+        final_image = _add_watermark_design(final_image, background_color, watermark)
     
     # Save to bytes
     output_buffer = io.BytesIO()
