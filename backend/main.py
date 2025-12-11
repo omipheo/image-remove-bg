@@ -196,85 +196,84 @@ async def upload_image(request: Request):
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 @app.get("/api/download")
-async def download_image(imageId: str = None, fileType: str = None):
+async def download_image(imageId: str | None = None, fileType: str | None = None):
     """
     Download the processed image or zip file.
     If imageId is provided, returns that specific image or zip file.
     Otherwise, returns the most recently processed image.
-    
-    Parameters:
-    - imageId: ID of the image/zip to download (e.g., "img_xxx" or "zip_xxx")
-    - fileType: Optional override for file type ("PNG" or "JPEG") - only for images
     """
     try:
-        image_data = None
-        
-        if imageId and imageId in processed_images:
-            image_data = processed_images[imageId]
-            print(f"[DOWNLOAD] Serving imageId={imageId}, filename={image_data.get('filename', 'unknown')}, size={len(image_data.get('data', []))} bytes")
-        elif processed_images:
-            # Return the most recent image
-            latest_id = list(processed_images.keys())[-1]
-            image_data = processed_images[latest_id]
-        else:
+        import workers  # ensure this is at top of file in real code
+        store = workers.get_processed_images()   # 🔴 use the workers' dict
+
+        if not store:
             raise HTTPException(status_code=404, detail="No processed image found")
-        
+
+        # Debug to verify we're seeing the right keys
+        print(f"[DOWNLOAD] imageId={imageId}, store_id={id(store)}, keys={list(store.keys())}")
+
+        # Strict handling when imageId is provided
+        if imageId is not None:
+            image_data = store.get(imageId)
+            if image_data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Image with id {imageId} not found",
+                )
+        else:
+            # Only use "most recent" if no imageId at all
+            latest_id = next(reversed(store))
+            image_data = store[latest_id]
+
         # Handle zip files
         if imageId and imageId.startswith("zip_") and "file_path" in image_data:
             zip_path = image_data["file_path"]
             if os.path.exists(zip_path):
-                with open(zip_path, 'rb') as f:
+                with open(zip_path, "rb") as f:
                     zip_bytes = f.read()
                 return Response(
                     content=zip_bytes,
                     media_type="application/zip",
                     headers={
                         "Content-Disposition": f'attachment; filename="{image_data["filename"]}"'
-                    }
+                    },
                 )
             else:
                 raise HTTPException(status_code=404, detail="Zip file not found")
-        
+
         # Handle regular images
-        # If fileType is specified, convert the image
         if fileType and fileType.upper() in ["PNG", "JPEG"]:
             output_format = "PNG" if fileType.upper() == "PNG" else "JPEG"
             mime_type = "image/png" if output_format == "PNG" else "image/jpeg"
-            
-            # Load the stored image
+
             stored_image = Image.open(io.BytesIO(image_data["data"]))
-            
-            # Convert format if needed
+
             if output_format == "JPEG" and stored_image.mode == "RGBA":
-                # Convert RGBA to RGB with white background for JPEG
                 rgb_image = Image.new("RGB", stored_image.size, (255, 255, 255))
                 rgb_image.paste(stored_image, mask=stored_image.split()[3])
                 stored_image = rgb_image
-            
-            # Convert to bytes
+
             img_byte_arr = io.BytesIO()
             stored_image.save(img_byte_arr, format=output_format, quality=95)
             img_byte_arr.seek(0)
             image_bytes = img_byte_arr.read()
-            
-            # Update filename extension
-            filename = image_data["filename"].rsplit('.', 1)[0]
+
+            filename_base = image_data["filename"].rsplit(".", 1)[0]
             extension = "png" if output_format == "PNG" else "jpg"
-            filename = f"{filename}.{extension}"
+            filename = f"{filename_base}.{extension}"
         else:
-            # Use stored format
             image_bytes = image_data["data"]
             mime_type = image_data.get("mime_type", "image/png")
             filename = image_data["filename"]
-        
+
         return Response(
             content=image_bytes,
             media_type=mime_type,
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"'
-            }
+            },
         )
-            
+
     except HTTPException:
         raise
     except Exception as e:
