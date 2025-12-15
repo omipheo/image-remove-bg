@@ -70,9 +70,19 @@ const MultipleImagesGrid = ({
                         onError={e => {
                           console.error(
                             '[GRID] Image failed to load:',
-                            filename
+                            filename,
+                            item.previewFailed ? '(preview download failed, but image was processed)' : ''
                           )
-                          e.currentTarget.style.display = 'none'
+                          // If preview failed, show a placeholder with download link
+                          if (item.previewFailed) {
+                            e.currentTarget.style.display = 'none'
+                            const placeholder = document.createElement('div')
+                            placeholder.className = 'image-placeholder'
+                            placeholder.innerHTML = 'Preview unavailable<br/><small>Image processed successfully</small>'
+                            e.currentTarget.parentElement.appendChild(placeholder)
+                          } else {
+                            e.currentTarget.style.display = 'none'
+                          }
                         }}
                       />
                     ) : (

@@ -286,6 +286,107 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.post("/api/get-processed-images")
+async def get_processed_images_endpoint(request: Request):
+    """
+    Get processed images from this worker, filtered by session_id and batch_ids.
+    Used by load balancer to aggregate images from all workers.
+    """
+    try:
+        import workers
+        processed_images_dict = workers.get_processed_images()
+        
+        body = await request.json()
+        batch_ids = body.get("batchIds", None)
+        session_id = body.get("sessionId")
+        
+        # Filter images based on session_id and batch_ids
+        filtered_images = {}
+        for image_id, data in processed_images_dict.items():
+            # Skip ZIP files
+            if image_id.startswith("zip_"):
+                continue
+            
+            # Filter by session_id
+            if session_id and data.get("session_id") != session_id:
+                continue
+            
+            # Filter by batch_ids
+            if batch_ids:
+                image_batch_id = None
+                parts = image_id.split("_")
+                if len(parts) >= 2 and parts[0] == "img":
+                    try:
+                        image_batch_id = int(parts[1])
+                    except ValueError:
+                        pass
+                
+                if image_batch_id is None or image_batch_id not in batch_ids:
+                    continue
+            
+            # Only include image files
+            if image_id.startswith("img_"):
+                image_data = data.get('data')
+                # Encode bytes as base64 for JSON serialization
+                if isinstance(image_data, bytes):
+                    image_data = base64.b64encode(image_data).decode('utf-8')
+                
+                filtered_images[image_id] = {
+                    'data': image_data,
+                    'filename': data.get('filename', f"{image_id}.jpg"),
+                    'format': data.get('format'),
+                    'mime_type': data.get('mime_type'),
+                }
+        
+        return {
+            "images": filtered_images,
+            "count": len(filtered_images)
+        }
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting processed images: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
+@app.post("/api/store-zip")
+async def store_zip_endpoint(request: Request):
+    """
+    Store a ZIP file on this worker.
+    Used by load balancer to store aggregated ZIPs.
+    """
+    try:
+        import workers
+        processed_images_dict = workers.get_processed_images()
+        
+        body = await request.json()
+        zip_id = body.get("zipId")
+        zip_path = body.get("zipPath")
+        
+        if not zip_id or not zip_path:
+            raise HTTPException(status_code=400, detail="zipId and zipPath required")
+        
+        if not os.path.exists(zip_path):
+            raise HTTPException(status_code=404, detail=f"ZIP file not found: {zip_path}")
+        
+        # Store ZIP metadata in processed_images dict
+        processed_images_dict[zip_id] = {
+            "filename": f"{zip_id}.zip",
+            "file_path": zip_path,
+            "mime_type": "application/zip",
+            "pre_uploaded": False,
+        }
+        
+        return {"success": True, "zipId": zip_id}
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error storing ZIP: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
 @app.post("/api/create-zip")
 async def create_zip_endpoint(request: Request):
     """
@@ -371,9 +472,15 @@ async def debug_processed_images():
 if __name__ == "__main__":
     # Use 127.0.0.1 for development (better Windows compatibility)
     # Use 0.0.0.0 for production (allows external connections)
-    host = os.getenv("HOST", "127.0.0.1")
+    host = os.getenv("HOST", "0.0.0.0")  # Changed to 0.0.0.0 for multi-GPU setup
     port = int(os.getenv("PORT", 8000))
     workers = int(os.getenv("WORKERS", 1))  # Number of worker processes
+    
+    # In multi-GPU mode, each process should use 1 worker (the process itself is the worker)
+    if os.getenv("GPU_ID") is not None:
+        workers = 1
+        print(f"[MULTI-GPU] Starting worker on GPU {os.getenv('GPU_ID')} on port {port}")
+    
     print(f"Starting server on http://{host}:{port} with {workers} worker(s)")
     uvicorn.run(
         app, 

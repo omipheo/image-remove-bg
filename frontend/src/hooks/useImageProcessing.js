@@ -125,31 +125,62 @@ export const useImageProcessing = () => {
     const totalBatches = Math.ceil(files.length / BATCH_SIZE)
     const completedBatches = new Set()
     let allBatchesComplete = false
+    // Track all processed images (even if preview download fails)
+    const processedImageIds = new Set()
 
     const ws = new ImageProcessingWebSocket(
       async (msg) => {
         // IMAGE RESULT
         if (msg.type === 'image_processed' && msg.success) {
+          // Track that this image was processed (for accurate counting)
+          processedImageIds.add(msg.imageId)
+
           const fullUrl = msg.downloadUrl.startsWith('http')
             ? msg.downloadUrl
             : `${API_CONFIG.BASE_URL}${msg.downloadUrl}`
 
-          const res = await fetch(fullUrl)
-          const blob = await res.blob()
-          const processedUrl = URL.createObjectURL(blob)
-
-          const file = ws.getFileForResult(msg)
-          if (!file) return
-
-          setProcessedImages(prev => [
-            ...prev,
-            {
-              file,
-              imageId: msg.imageId,
-              originalUrl: originalUrls.get(file),
-              processedUrl
+          try {
+            const res = await fetch(fullUrl)
+            if (!res.ok) {
+              throw new Error(`Failed to download preview: ${res.status}`)
             }
-          ])
+            const blob = await res.blob()
+            const processedUrl = URL.createObjectURL(blob)
+
+            const file = ws.getFileForResult(msg)
+            if (!file) return
+
+            setProcessedImages(prev => [
+              ...prev,
+              {
+                file,
+                imageId: msg.imageId,
+                originalUrl: originalUrls.get(file),
+                processedUrl
+              }
+            ])
+          } catch (err) {
+            // Preview download failed, but image was processed successfully
+            // Add it to processedImages anyway with a placeholder URL
+            console.warn(`[WS] Preview download failed for ${msg.imageId}, but image was processed:`, err)
+            
+            const file = ws.getFileForResult(msg)
+            if (!file) return
+
+            // Use the download URL as processedUrl (will be fetched when needed)
+            const processedUrl = fullUrl
+
+            setProcessedImages(prev => [
+              ...prev,
+              {
+                file,
+                imageId: msg.imageId,
+                originalUrl: originalUrls.get(file),
+                processedUrl,
+                previewFailed: true // Flag to indicate preview needs to be fetched on demand
+              }
+            ])
+          }
         }
 
         // BATCH COMPLETE - Track completion
@@ -256,9 +287,30 @@ export const useImageProcessing = () => {
     downloadFile(blob, generateDownloadFilename(currentFile.name, fileType))
   }
 
-  const downloadProcessedImage = (item, fileType) => {
-    const blob = dataURLToBlob(item.processedUrl)
-    downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
+  const downloadProcessedImage = async (item, fileType) => {
+    // If preview failed, fetch from URL directly
+    if (item.previewFailed && item.processedUrl) {
+      try {
+        const fullUrl = item.processedUrl.startsWith('http')
+          ? item.processedUrl
+          : `${API_CONFIG.BASE_URL}${item.processedUrl}`
+        const res = await fetch(fullUrl)
+        if (!res.ok) throw new Error(`Failed to download: ${res.status}`)
+        const blob = await res.blob()
+        downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
+      } catch (err) {
+        console.error('[DOWNLOAD] Failed to download image:', err)
+        // Fallback: try using the imageId to construct download URL
+        if (item.imageId) {
+          const downloadUrl = `${API_CONFIG.BASE_URL}/api/download?imageId=${item.imageId}`
+          window.open(downloadUrl, '_blank')
+        }
+      }
+    } else {
+      // Normal case: use blob URL
+      const blob = dataURLToBlob(item.processedUrl)
+      downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
+    }
   }
 
   const downloadAllProcessedImages = async (fileType, asZip) => {
@@ -273,9 +325,31 @@ export const useImageProcessing = () => {
     }
 
     for (const item of processedImages) {
-      const blob = dataURLToBlob(item.processedUrl)
-      downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
-      await new Promise(r => setTimeout(r, 150))
+      try {
+        // If preview failed, fetch from URL directly
+        if (item.previewFailed && item.processedUrl) {
+          const fullUrl = item.processedUrl.startsWith('http')
+            ? item.processedUrl
+            : `${API_CONFIG.BASE_URL}${item.processedUrl}`
+          const res = await fetch(fullUrl)
+          if (res.ok) {
+            const blob = await res.blob()
+            downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
+          } else if (item.imageId) {
+            // Fallback: use imageId to construct download URL
+            const downloadUrl = `${API_CONFIG.BASE_URL}/api/download?imageId=${item.imageId}`
+            window.open(downloadUrl, '_blank')
+          }
+        } else {
+          // Normal case: use blob URL
+          const blob = dataURLToBlob(item.processedUrl)
+          downloadFile(blob, generateDownloadFilename(item.file.name, fileType))
+        }
+        await new Promise(r => setTimeout(r, 150))
+      } catch (err) {
+        console.error(`[DOWNLOAD] Failed to download ${item.file?.name}:`, err)
+        // Continue with next image
+      }
     }
   }
 

@@ -14,7 +14,11 @@ _model_pool: Dict[int, any] = {}
 _model_pool_initialized = False
 
 def initialize_model_pool():
-    """Initialize one transparent-background Remover model per GPU (called at startup)"""
+    """Initialize one transparent-background Remover model per GPU (called at startup)
+    
+    In multi-GPU mode (CUDA_VISIBLE_DEVICES set), only initializes the visible GPU.
+    In single-process mode, initializes all available GPUs.
+    """
     global _model_pool, _model_pool_initialized
     
     if _model_pool_initialized:
@@ -23,23 +27,40 @@ def initialize_model_pool():
     try:
         from transparent_background import Remover
         
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        print(f"[MODEL_POOL] Initializing model pool with {num_gpus} GPU(s)")
+        # Check if we're in single-GPU-per-process mode
+        gpu_id_env = os.getenv("GPU_ID")
+        cuda_visible = os.getenv("CUDA_VISIBLE_DEVICES")
         
-        for gpu_id in range(num_gpus):
-            print(f"[MODEL_POOL] Loading transparent-background model on GPU {gpu_id}...")
+        if gpu_id_env is not None or cuda_visible is not None:
+            # Single-GPU-per-process mode: only initialize GPU 0 (which is the pinned GPU)
+            num_gpus = 1
+            print(f"[MODEL_POOL] Single-GPU-per-process mode detected (GPU_ID={gpu_id_env}, CUDA_VISIBLE_DEVICES={cuda_visible})")
+            print(f"[MODEL_POOL] Initializing model on GPU 0 (pinned GPU)...")
             
-            # Set the CUDA device before creating the model
-            torch.cuda.set_device(gpu_id)
+            torch.cuda.set_device(0)
+            model = Remover(device='cuda:0', mode='fast', jit=False)
+            _model_pool[0] = model
             
-            # Use 'fast' mode for speed - optimized for RTX 3090
-            model = Remover(device=f'cuda:{gpu_id}', mode='fast', jit=False)
-            _model_pool[gpu_id] = model
+            print(f"[MODEL_POOL] Model loaded on pinned GPU (visible as GPU 0)")
+        else:
+            # Multi-GPU mode: initialize all GPUs
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+            print(f"[MODEL_POOL] Multi-GPU mode: Initializing model pool with {num_gpus} GPU(s)")
             
-            print(f"[MODEL_POOL] Model loaded on GPU {gpu_id}")
+            for gpu_id in range(num_gpus):
+                print(f"[MODEL_POOL] Loading transparent-background model on GPU {gpu_id}...")
+                
+                # Set the CUDA device before creating the model
+                torch.cuda.set_device(gpu_id)
+                
+                # Use 'fast' mode for speed - optimized for RTX 3090
+                model = Remover(device=f'cuda:{gpu_id}', mode='fast', jit=False)
+                _model_pool[gpu_id] = model
+                
+                print(f"[MODEL_POOL] Model loaded on GPU {gpu_id}")
         
         _model_pool_initialized = True
-        print(f"[MODEL_POOL] Model pool initialization complete: {len(_model_pool)} models ready")
+        print(f"[MODEL_POOL] Model pool initialization complete: {len(_model_pool)} model(s) ready")
         
     except Exception as e:
         print(f"[MODEL_POOL] Error initializing model pool: {str(e)}")
@@ -80,12 +101,21 @@ def process_image_sync(
         tuple: (output_bytes, mime_type, output_filename, save_format)
     """
     try:
-        # Determine GPU to use (round-robin if not specified)
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        if gpu_id is None:
-            # Simple round-robin based on a global counter
-            import time
-            gpu_id = int(time.time() * 1000) % num_gpus
+        # Determine GPU to use
+        # In single-GPU-per-process mode, always use GPU 0 (the pinned GPU)
+        gpu_id_env = os.getenv("GPU_ID")
+        cuda_visible = os.getenv("CUDA_VISIBLE_DEVICES")
+        
+        if gpu_id_env is not None or cuda_visible is not None:
+            # Single-GPU-per-process mode: always use GPU 0
+            gpu_id = 0
+        else:
+            # Multi-GPU mode: use round-robin if not specified
+            num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+            if gpu_id is None:
+                # Simple round-robin based on a global counter
+                import time
+                gpu_id = int(time.time() * 1000) % num_gpus
         
         print(f"[PROCESSOR] Processing {filename} on GPU {gpu_id}")
         
@@ -111,9 +141,11 @@ def process_image_sync(
         # Get pre-loaded model from pool (NO NEW MODEL CREATION)
         remover = get_model_for_gpu(gpu_id)
         
-        # Process image - transparent_background returns RGBA image
-        # Single image processing
-        processed_image = remover.process(input_image)
+        # Optional FP16 (disabled by default to preserve output quality)
+        use_fp16 = os.getenv("USE_FP16", "false").lower() == "true"
+        autocast_dtype = torch.float16 if use_fp16 else None
+        with torch.cuda.amp.autocast(enabled=use_fp16, dtype=autocast_dtype):
+            processed_image = remover.process(input_image)
         
         # Apply background color and save
         output_bytes, mime_type, output_filename, save_format = _finalize_image(
@@ -198,10 +230,13 @@ def process_images_batch(
         # Process images sequentially with same model instance
         # (transparent-background doesn't support true batch inference)
         processed_images = []
+        use_fp16 = os.getenv("USE_FP16", "false").lower() == "true"
+        autocast_dtype = torch.float16 if use_fp16 else None
         for i, img in enumerate(images):
             try:
-                # Process single image
-                processed = remover.process(img)
+                # Process single image with optional FP16 autocast
+                with torch.cuda.amp.autocast(enabled=use_fp16, dtype=autocast_dtype):
+                    processed = remover.process(img)
                 processed_images.append(processed)
                 print(f"[PROCESSOR] Processed {i+1}/{len(images)}: {valid_filenames[i]}")
             except Exception as e:
