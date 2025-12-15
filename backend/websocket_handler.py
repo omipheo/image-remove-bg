@@ -22,6 +22,8 @@ class JSONImageBatchHandler:
         self.processing_batches = set()
         self.completed_batches = set()
         self.total_batches = None  # Will be set when we know total batch count
+        self.running_tasks = {}  # Track running batch processing tasks
+        self.websocket_closed = False  # Track if websocket is closed
 
     async def handle_message(self, text_data: str):
         msg = json.loads(text_data)
@@ -36,7 +38,14 @@ class JSONImageBatchHandler:
 
         await self.ws.send_json({"type": "batch_queued", "batchId": batch_id})
 
-        await self._process_batch_background(batch_id, len(images_data), images_data)
+        # Process batches concurrently - don't wait for previous batch to finish
+        task = asyncio.create_task(self._process_batch_background(batch_id, len(images_data), images_data))
+        self.running_tasks[batch_id] = task
+        
+        # Clean up task when done
+        def cleanup_task(t, bid=batch_id):
+            self.running_tasks.pop(bid, None)
+        task.add_done_callback(lambda t: cleanup_task(t, batch_id))
 
     async def _process_batch_background(self, batch_id: int, batch_size: int, images_data: list):
         try:
@@ -82,6 +91,10 @@ class JSONImageBatchHandler:
             success_count = len([r for r in results if r.get("success")])
             self.completed_batches.add(batch_id)
             
+            if self.websocket_closed:
+                logger.warning(f"WebSocket closed, skipping batch_complete for batch {batch_id}")
+                return
+            
             try:
                 await self.ws.send_json({
                     "type": "batch_complete",
@@ -90,6 +103,7 @@ class JSONImageBatchHandler:
                     "totalCount": len(results)
                 })
             except (RuntimeError, Exception) as e:
+                self.websocket_closed = True
                 logger.warning(f"Could not send batch_complete for batch {batch_id}: {e}")
                 return  # WebSocket closed, stop processing
 
@@ -105,6 +119,8 @@ class JSONImageBatchHandler:
                 logger.error(f"Error in batch {batch_id}: {e}. Could not send error message (WebSocket closed): {send_error}")
 
     async def _send_result(self, result):
+        if self.websocket_closed:
+            return
         try:
             await self.ws.send_json({
                 "type": "image_processed",
@@ -116,6 +132,7 @@ class JSONImageBatchHandler:
                 "success": True
             })
         except (RuntimeError, Exception) as e:
+            self.websocket_closed = True
             # WebSocket is closed, skip sending
             logger.warning(f"Could not send result for batch {result['batch_id']}: {e}")
 
@@ -130,10 +147,39 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.send_json({"type": "config_ack", "config": config})
 
     handler = JSONImageBatchHandler(websocket, config)
+    websocket_closed = False
+
+    async def message_loop():
+        nonlocal websocket_closed
+        try:
+            while True:
+                msg = await websocket.receive_text()
+                await handler.handle_message(msg)
+        except WebSocketDisconnect:
+            websocket_closed = True
+            handler.websocket_closed = True
+            logger.info("WebSocket disconnected by client")
+        except Exception as e:
+            logger.error(f"Error in message loop: {e}", exc_info=True)
+            websocket_closed = True
+            handler.websocket_closed = True
+
+    message_task = asyncio.create_task(message_loop())
 
     try:
-        while True:
-            msg = await websocket.receive_text()
-            await handler.handle_message(msg)
-    except WebSocketDisconnect:
-        pass
+        await message_task
+    except Exception as e:
+        logger.error(f"Error in websocket endpoint: {e}", exc_info=True)
+    finally:
+        if handler.running_tasks:
+            logger.info(f"Waiting for {len(handler.running_tasks)} batch(es) to complete before closing...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*handler.running_tasks.values(), return_exceptions=True),
+                    timeout=300
+                )
+                logger.info("All batches completed")
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for batches to complete")
+            except Exception as e:
+                logger.error(f"Error waiting for batches: {e}", exc_info=True)

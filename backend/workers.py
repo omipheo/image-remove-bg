@@ -14,6 +14,7 @@ import sys
 import zipfile
 import tempfile
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,18 @@ def create_zip_for_all_images(processed_images_dict: dict, batch_ids: list = Non
 _batch_queue = asyncio.Queue()
 _batch_processor_started = False
 _processing_semaphore = asyncio.Semaphore(max(1, NUM_GPUS * 8))
+_processing_executor = None
+
+
+def get_processing_executor():
+    """Get or create a ThreadPoolExecutor for image processing"""
+    global _processing_executor
+    if _processing_executor is None:
+        # Use more workers for better parallelism (up to 80 workers for 4 GPUs)
+        max_workers = min(80, NUM_GPUS * 20) if NUM_GPUS > 0 else 4
+        _processing_executor = ThreadPoolExecutor(max_workers=max_workers)
+        print(f"[WORKERS] Created processing executor with {max_workers} workers")
+    return _processing_executor
 
 
 def get_processing_semaphore():
@@ -181,14 +194,34 @@ async def process_batch_parallel(batch_images, batch_id, config, callback, sessi
             input_hash = hashlib.md5(image_bytes[:1024]).hexdigest()
             print(f"[WORKER] Input hash task {task_id}: {input_hash[:8]}… size={len(image_bytes)}")
 
-            result_tuple = await asyncio.to_thread(
+            # Determine GPU to use (round-robin based on task_id for even distribution)
+            # In multi-GPU-per-process mode, distribute across GPUs
+            # In single-GPU-per-process mode, always use GPU 0
+            gpu_id_env = os.getenv("GPU_ID")
+            cuda_visible = os.getenv("CUDA_VISIBLE_DEVICES")
+            
+            if gpu_id_env is not None or cuda_visible is not None:
+                # Single-GPU-per-process mode: always use GPU 0
+                assigned_gpu_id = 0
+            else:
+                # Multi-GPU mode: assign based on task_id for even distribution
+                num_gpus = NUM_GPUS if NUM_GPUS > 0 else 1
+                assigned_gpu_id = task_id % num_gpus
+            
+            print(f"[WORKER] Task {task_id} assigned to GPU {assigned_gpu_id}")
+
+            # Use custom executor with more workers for better parallelism
+            loop = asyncio.get_event_loop()
+            executor = get_processing_executor()
+            result_tuple = await loop.run_in_executor(
+                executor,
                 process_image_sync,
                 image_bytes,
                 bg_color,
                 file_type,
                 watermark,
                 filename,
-                None
+                assigned_gpu_id  # Pass assigned GPU ID
             )
 
             output_bytes, mime_type, output_filename, save_format = result_tuple
