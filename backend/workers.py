@@ -74,9 +74,10 @@ def create_zip_for_batch(batch_id: int, processed_images_dict: dict):
     return zip_id
 
 
-def create_zip_for_all_images(processed_images_dict: dict, batch_ids: list = None):
+def create_zip_for_all_images(processed_images_dict: dict, batch_ids: list = None, session_id: str | None = None):
     """
     Create ZIP file containing ALL processed images (from all batches).
+    Optionally filter by batch IDs and/or session ID.
     Store it inside processed_images dict.
     """
     zip_id = f"zip_all_{int(time.time())}"
@@ -90,6 +91,10 @@ def create_zip_for_all_images(processed_images_dict: dict, batch_ids: list = Non
         for image_id, data in processed_images_dict.items():
             # Skip existing ZIP files and only include image files
             if image_id.startswith("zip_"):
+                continue
+
+            # If a session is specified, only include images for that session
+            if session_id and data.get("session_id") != session_id:
                 continue
             
             # If batch_ids specified, only include images from those batches
@@ -150,7 +155,7 @@ def start_batch_processor():
 
 
 
-async def process_batch_parallel(batch_images, batch_id, config, callback):
+async def process_batch_parallel(batch_images, batch_id, config, callback, session_id=None):
     """
     Process batch of images in parallel across GPUs - optimized for 4x RTX 3090.
     """
@@ -202,7 +207,8 @@ async def process_batch_parallel(batch_images, batch_id, config, callback):
                 'filename': output_filename,
                 'format': save_format,
                 'mime_type': mime_type,
-                'pre_uploaded': False
+                'pre_uploaded': False,
+                'session_id': session_id,
             }
             print(f"[WORKER] 🔍 After storing: processed_images has {len(processed_images_dict)} images")
 

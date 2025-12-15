@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import base64
+import uuid
 from fastapi import WebSocket, WebSocketDisconnect
 import io
 from PIL import Image
@@ -68,11 +69,13 @@ class JSONImageBatchHandler:
 
             # GPU processing
             from workers import process_batch_parallel
+            session_id = self.config.get("sessionId")
             results = await process_batch_parallel(
                 batch_images=batch_images,
                 batch_id=batch_id,
                 config=self.config,
-                callback=self._send_result
+                callback=self._send_result,
+                session_id=session_id,
             )
 
             # Notify completion
@@ -122,6 +125,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
     config_data = await websocket.receive_text()
     config = json.loads(config_data)
+    # Ensure every websocket session has a unique sessionId
+    config.setdefault("sessionId", f"ws_{uuid.uuid4().hex}")
     await websocket.send_json({"type": "config_ack", "config": config})
 
     handler = JSONImageBatchHandler(websocket, config)

@@ -17,6 +17,7 @@ export class ImageProcessingWebSocket {
     this.batchFiles = new Map()
     // Map (batchId, taskId) -> file for reliable lookup
     this.fileMap = new Map()
+    this.sessionId = null
 
     // OPTIMIZATION: Increased for 600 Mbps upload speed
     // this.maxConcurrentUploads = 20  // Increased from 10 to 20
@@ -24,7 +25,7 @@ export class ImageProcessingWebSocket {
     // this.maxBufferSize = 2048 * 1024 // Increased from 1MB to 2MB
   }
 
-  connect(backgroundColor, fileType, watermark, batchSize = 20) {
+  connect(backgroundColor, fileType, watermark, batchSize = 20, sessionId = null) {
     return new Promise((resolve, reject) => {
       try {
         let wsUrl
@@ -50,12 +51,15 @@ export class ImageProcessingWebSocket {
           console.log('[WS] ✅ WebSocket connected')
           this.isConnected = true
 
+          this.sessionId = sessionId || this.sessionId || `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
           this.ws.send(JSON.stringify({
             type: 'config',
             backgroundColor: backgroundColor || 'white',
             fileType: fileType || 'JPEG',
             watermark: watermark || 'none',
-            batchSize: batchSize || 20
+            batchSize: batchSize || 20,
+            sessionId: this.sessionId
           }))
 
           resolve()

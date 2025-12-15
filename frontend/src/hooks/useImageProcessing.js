@@ -111,6 +111,9 @@ export const useImageProcessing = () => {
     setProcessedImages([])
     setZipInfo(null)
 
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const BATCH_SIZE = 20
+
     const originalUrls = new Map()
 
     for (const file of files) {
@@ -119,7 +122,7 @@ export const useImageProcessing = () => {
     }
 
     // Track batches for ZIP download
-    const totalBatches = Math.ceil(files.length / 20)
+    const totalBatches = Math.ceil(files.length / BATCH_SIZE)
     const completedBatches = new Set()
     let allBatchesComplete = false
 
@@ -167,7 +170,10 @@ export const useImageProcessing = () => {
               const zipResponse = await fetch(`${API_CONFIG.BASE_URL}/api/create-zip`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ batchIds: Array.from(completedBatches) })
+                body: JSON.stringify({
+                  batchIds: Array.from(completedBatches),
+                  sessionId
+                })
               })
 
               if (zipResponse.ok) {
@@ -232,9 +238,7 @@ export const useImageProcessing = () => {
 
     wsRef.current = ws
 
-    await ws.connect(backgroundColor, fileType, watermark)
-
-    const BATCH_SIZE = 20
+    await ws.connect(backgroundColor, fileType, watermark, BATCH_SIZE, sessionId)
     let batchId = 0
 
     for (let i = 0; i < files.length; i += BATCH_SIZE) {

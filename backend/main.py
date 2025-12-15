@@ -298,8 +298,13 @@ async def create_zip_endpoint(request: Request):
         
         body = await request.json()
         batch_ids = body.get("batchIds", None)
+        session_id = body.get("sessionId")
         
-        zip_id = workers.create_zip_for_all_images(processed_images_dict, batch_ids)
+        zip_id = workers.create_zip_for_all_images(
+            processed_images_dict,
+            batch_ids,
+            session_id
+        )
         
         return {
             "zipId": zip_id,
